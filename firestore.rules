@@ -1,0 +1,72 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helpers ────────────────────────────────────────────────────────────
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuth() && request.auth.uid == uid;
+    }
+
+    // ─── /users/{uid} ───────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read:   if isOwner(uid);
+      allow create: if isOwner(uid);
+      allow update: if isOwner(uid);
+      allow delete: if false;
+    }
+
+    // ─── /connectedAccounts/{id} ────────────────────────────────────────────
+    // Status/health/color fields only — no tokens live here. Written only by
+    // Cloud Functions (OAuth callback, sync, health checks).
+    match /connectedAccounts/{id} {
+      allow read:  if isOwner(resource.data.uid);
+      allow write: if false;
+
+      // Tokens — never client-readable or writable, under any circumstance.
+      // Split into a subcollection because Firestore rules cannot redact
+      // individual fields within one document.
+      match /secure/{doc=**} {
+        allow read, write: if false;
+      }
+    }
+
+    // ─── /events/{eventId} ──────────────────────────────────────────────────
+    // Cached calendar events, written only by the sync Cloud Function.
+    match /events/{eventId} {
+      allow read:  if isOwner(resource.data.uid);
+      allow write: if false;
+    }
+
+    // ─── /slackMessages/{msgId} ─────────────────────────────────────────────
+    // Cached Slack messages, written only by the Slack Events webhook.
+    match /slackMessages/{msgId} {
+      allow read:  if isOwner(resource.data.uid);
+      allow write: if false;
+    }
+
+    // ─── /settings/{uid} ────────────────────────────────────────────────────
+    match /settings/{uid} {
+      allow read:   if isOwner(uid);
+      allow create: if isOwner(uid);
+      allow update: if isOwner(uid);
+      allow delete: if false;
+    }
+
+    // ─── /sentLog/{uid} ─────────────────────────────────────────────────────
+    // Reminder/digest dedup log — internal bookkeeping, Cloud Functions only.
+    match /sentLog/{uid} {
+      allow read, write: if false;
+    }
+
+    // ─── /oauthState/{stateId} ──────────────────────────────────────────────
+    // Short-lived CSRF state for the OAuth connect flow — Cloud Functions only.
+    match /oauthState/{stateId} {
+      allow read, write: if false;
+    }
+  }
+}
