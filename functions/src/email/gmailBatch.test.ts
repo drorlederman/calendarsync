@@ -96,6 +96,39 @@ test("parseGmailBatchResponse skips non-200 parts", () => {
   assert.ok(map.has("ok1"));
 });
 
+test("parseGmailBatchResponse falls back to Content-ID when JSON has no id", () => {
+  const boundary = "batch_noid";
+  const cases: Array<{ contentId: string; expectedKey: string }> = [
+    { contentId: "response-item0+m1", expectedKey: "m1" },
+    { contentId: "<item0+m1>", expectedKey: "m1" },
+  ];
+
+  for (const { contentId, expectedKey } of cases) {
+    const raw = [
+      `--${boundary}`,
+      "Content-Type: application/http",
+      `Content-ID: ${contentId}`,
+      "",
+      "HTTP/1.1 200 OK",
+      "Content-Type: application/json; charset=UTF-8",
+      "",
+      JSON.stringify({
+        snippet: "no-id-body",
+        internalDate: "1720000000000",
+        labelIds: ["INBOX"],
+        payload: { headers: [] },
+      }),
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+
+    const map = parseGmailBatchResponse(raw, boundary);
+    assert.equal(map.size, 1);
+    assert.ok(map.has(expectedKey));
+    assert.equal((map.get(expectedKey) as { snippet: string }).snippet, "no-id-body");
+  }
+});
+
 test("normalizeGmailMetadataMessage maps headers and unread", () => {
   const msg = normalizeGmailMetadataMessage("abc", {
     id: "abc",
