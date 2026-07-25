@@ -28,6 +28,11 @@ test("buildGmailMetadataBatchBody emits one GET part per id", () => {
   assert.match(body, /metadataHeaders=From/);
   assert.match(body, /metadataHeaders=Subject/);
   assert.match(body, /--batch_test--/);
+  // Blank line after each nested GET before the next boundary.
+  assert.match(
+    body,
+    /GET \/gmail\/v1\/users\/me\/messages\/m1\?[^\r\n]*\r\n\r\n--batch_test\r\n/,
+  );
 });
 
 test("parseGmailBatchResponse maps Content-ID / path id to JSON bodies", () => {

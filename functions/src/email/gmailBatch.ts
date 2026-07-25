@@ -28,12 +28,15 @@ export function buildGmailMetadataBatchBody(messageIds: string[], boundary: stri
     const path =
       `/gmail/v1/users/me/messages/${encodeURIComponent(id)}` +
       `?format=metadata&metadataHeaders=From&metadataHeaders=Subject`;
+    // Trailing blank line after the nested GET is required by Google's
+    // multipart/mixed batch framing before the next boundary.
     return [
       `--${boundary}`,
       "Content-Type: application/http",
       `Content-ID: <item${i}+${id}>`,
       "",
       `GET ${path}`,
+      "",
       "",
     ].join("\r\n");
   });
