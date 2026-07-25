@@ -111,7 +111,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="md:mr-64 min-h-screen">
-        <div className="p-4 md:p-8 max-w-5xl">
+        <div className={`p-4 md:p-8 ${pathname?.startsWith("/calendar") ? "max-w-6xl" : "max-w-5xl"}`}>
           {children}
         </div>
       </main>
