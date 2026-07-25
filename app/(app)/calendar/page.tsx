@@ -30,12 +30,15 @@ export default function CalendarPage() {
   useEffect(() => {
     if (!user) return;
     let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
 
     (async () => {
       const [{ db }, { collection, query, where, orderBy, onSnapshot, Timestamp }] = await Promise.all([
         import("@/lib/firebase/client"),
         import("firebase/firestore"),
       ]);
+      if (cancelled) return;
+
       setLoading(true);
       setError(null);
 
@@ -76,7 +79,10 @@ export default function CalendarPage() {
       );
     })();
 
-    return () => unsubscribe?.();
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, [user, view, anchorDate]);
 
   const openReminder = (event: EventRow) => {
