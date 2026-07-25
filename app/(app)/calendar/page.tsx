@@ -9,10 +9,12 @@ import MonthView from "@/components/calendar/MonthView";
 import CalendarViewToggle from "@/components/calendar/CalendarViewToggle";
 import EventDetailModal from "@/components/calendar/EventDetailModal";
 import AddReminderModal from "@/components/reminders/AddReminderModal";
+import { OUT_OF_WINDOW_LABEL } from "@/components/calendar/outOfWindow";
 import {
   CalendarView,
   getVisibleRange,
   startOfLocalDay,
+  syncWindowLabel,
 } from "@/lib/calendar/range";
 
 type EventRow = EventDoc & { id: string };
@@ -105,6 +107,12 @@ export default function CalendarPage() {
         onViewChange={setView}
         onAnchorChange={setAnchorDate}
       />
+
+      {wide && (
+        <p className="text-xs" style={{ color: "#5B6477" }}>
+          נתונים מסונכרנים זמינים בטווח {syncWindowLabel()}. ימים מחוץ לטווח מסומנים כ״{OUT_OF_WINDOW_LABEL}״.
+        </p>
+      )}
 
       {error ? (
         <div className="rounded-xl px-4 py-3 text-sm" style={{ background: "#FEF2F2", color: "#EF4444" }}>{error}</div>

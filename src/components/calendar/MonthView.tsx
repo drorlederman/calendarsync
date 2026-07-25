@@ -6,7 +6,9 @@ import {
   dayKey,
   getMonthGridDays,
   getMonthRange,
+  isDayInSyncWindow,
 } from "@/lib/calendar/range";
+import { OUT_OF_WINDOW_LABEL, OUT_OF_WINDOW_TITLE, outOfWindowStyle } from "./outOfWindow";
 
 type EventRow = EventDoc & { id: string };
 
@@ -71,6 +73,7 @@ export default function MonthView({
           const dayEvents = byDay.get(key) ?? [];
           const overflow = Math.max(0, dayEvents.length - MAX_CHIPS);
           const isToday = key === todayKey;
+          const inWindow = isDayInSyncWindow(d);
           return (
             <div
               key={key}
@@ -80,15 +83,22 @@ export default function MonthView({
                 borderLeft: "1px solid #E8EDF5",
                 background: isToday ? "#F8FAFF" : undefined,
                 opacity: inMonth ? 1 : 0.4,
+                ...(inWindow ? {} : outOfWindowStyle),
               }}
+              title={inWindow ? undefined : OUT_OF_WINDOW_TITLE}
             >
               <div
                 className="text-[11px] font-semibold mb-0.5 px-0.5"
-                style={{ color: isToday ? "#2563EB" : "#0D1321" }}
+                style={{ color: isToday ? "#2563EB" : inWindow ? "#0D1321" : "#9AA3B2" }}
               >
                 {new Intl.DateTimeFormat("he-IL", { timeZone: TIMEZONE, day: "numeric" }).format(d)}
               </div>
               <div className="space-y-0.5">
+                {!inWindow && (
+                  <div className="text-[10px] px-0.5" style={{ color: "#9AA3B2" }}>
+                    {OUT_OF_WINDOW_LABEL}
+                  </div>
+                )}
                 {dayEvents.slice(0, MAX_CHIPS).map((event) => (
                   <button
                     key={event.id}

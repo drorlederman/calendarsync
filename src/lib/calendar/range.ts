@@ -135,8 +135,10 @@ export function shiftAnchor(view: "week" | "month", anchor: Date, direction: -1 
 }
 
 /**
- * Prev/next is allowed only when the *entire* neighbor visible range sits
- * inside the sync window [window.start, window.end).
+ * Prev/next is allowed when the neighbor visible range *overlaps* the sync
+ * window at all. Containment would permanently disable month navigation, since
+ * a 31-day window can never contain a full calendar month plus its padding.
+ * Days outside the window are rendered as explicitly uncached by the grids.
  */
 export function canNavigate(
   view: "week" | "month",
@@ -147,7 +149,27 @@ export function canNavigate(
   const neighborAnchor = shiftAnchor(view, anchor, direction);
   const range = view === "week" ? getWeekRange(neighborAnchor) : getMonthRange(neighborAnchor);
   const window = getSyncWindow(now);
-  return range.start.getTime() >= window.start.getTime() && range.end.getTime() <= window.end.getTime();
+  // Both ranges are half-open [start, end).
+  return range.start.getTime() < window.end.getTime() && range.end.getTime() > window.start.getTime();
+}
+
+/** True when the Jerusalem day containing `day` is covered by the sync window. */
+export function isDayInSyncWindow(day: Date, now: Date = new Date()): boolean {
+  const window = getSyncWindow(now);
+  const t = startOfLocalDay(day).getTime();
+  return t >= window.start.getTime() && t < window.end.getTime();
+}
+
+/** Hebrew label describing the cached sync window, e.g. "14 ביולי – 14 באוגוסט". */
+export function syncWindowLabel(now: Date = new Date()): string {
+  const { start, end } = getSyncWindow(now);
+  const lastDay = addLocalDays(end, -1);
+  const fmt = new Intl.DateTimeFormat("he-IL", {
+    timeZone: TIMEZONE,
+    day: "numeric",
+    month: "long",
+  });
+  return `${fmt.format(start)} – ${fmt.format(lastDay)}`;
 }
 
 export function periodLabel(view: "week" | "month", anchor: Date): string {

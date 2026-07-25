@@ -1,7 +1,8 @@
 "use client";
 
 import { EventDoc } from "@/lib/types";
-import { TIMEZONE, dayKey, getWeekRange, addLocalDays } from "@/lib/calendar/range";
+import { TIMEZONE, dayKey, getWeekRange, addLocalDays, isDayInSyncWindow } from "@/lib/calendar/range";
+import { OUT_OF_WINDOW_LABEL, OUT_OF_WINDOW_TITLE, outOfWindowStyle } from "./outOfWindow";
 
 type EventRow = EventDoc & { id: string };
 
@@ -52,8 +53,17 @@ export default function WeekView({
           const key = dayKey(d);
           const dayEvents = byDay.get(key) ?? [];
           const isToday = key === todayKey;
+          const inWindow = isDayInSyncWindow(d);
           return (
-            <div key={key} className="min-h-[12rem] flex flex-col" style={{ borderColor: "#E8EDF5" }}>
+            <div
+              key={key}
+              className="min-h-[12rem] flex flex-col"
+              style={{
+                borderColor: "#E8EDF5",
+                ...(inWindow ? {} : outOfWindowStyle),
+              }}
+              title={inWindow ? undefined : OUT_OF_WINDOW_TITLE}
+            >
               <div
                 className="px-2 py-2 text-center"
                 style={{ borderBottom: "1px solid #E8EDF5", background: isToday ? "#EFF4FF" : undefined }}
@@ -61,12 +71,17 @@ export default function WeekView({
                 <div className="text-[11px]" style={{ color: "#5B6477" }}>{weekdayShort(d)}</div>
                 <div
                   className="text-sm font-semibold"
-                  style={{ color: isToday ? "#2563EB" : "#0D1321" }}
+                  style={{ color: isToday ? "#2563EB" : inWindow ? "#0D1321" : "#9AA3B2" }}
                 >
                   {dayNum(d)}
                 </div>
               </div>
               <div className="flex-1 p-1 space-y-1 overflow-y-auto max-h-[28rem]">
+                {!inWindow && (
+                  <div className="text-[10px] text-center pt-2" style={{ color: "#9AA3B2" }}>
+                    {OUT_OF_WINDOW_LABEL}
+                  </div>
+                )}
                 {dayEvents.map((event) => (
                   <button
                     key={event.id}

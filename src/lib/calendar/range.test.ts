@@ -10,7 +10,9 @@ import {
   getMonthGridDays,
   dayKey,
   startOfLocalDay,
-} from "./range.ts";
+  isDayInSyncWindow,
+  syncWindowLabel,
+} from "./range";
 
 // Fixed "now": Wednesday 2026-07-15 12:00 Asia/Jerusalem ≈ 09:00 UTC
 const NOW = new Date("2026-07-15T09:00:00.000Z");
@@ -92,29 +94,76 @@ describe("shiftAnchor / canNavigate", () => {
     assert.equal(dayKey(backToJan), "2026-01-28"); // clamped anchor lands on Jan 28, not Jan 31
   });
 
-  it("canNavigate prev week is false when previous week starts before sync window", () => {
-    // Window starts 2026-07-14. Week of Jul 5–11 starts before that.
+  // Sync window for NOW is [2026-07-14, 2026-08-15). canNavigate uses *overlap*:
+  // the neighbor range only has to intersect the window, not sit inside it.
+  it("canNavigate week allows a neighbor that partially overlaps the window", () => {
     const early = startOfLocalDay(new Date("2026-07-08T09:00:00.000Z"));
+    // Next week from Jul 8 is [Jul 12, Jul 19) — starts before the window but
+    // overlaps Jul 14–18, so navigation is allowed.
+    assert.equal(canNavigate("week", early, 1, NOW), true);
+    // Prev week is [Jun 28, Jul 5) — entirely before the window → blocked.
     assert.equal(canNavigate("week", early, -1, NOW), false);
-    // Next week from Jul 8 anchor is Jul 12–19; start Jul 12 is also before window.
-    assert.equal(canNavigate("week", early, 1, NOW), false);
   });
 
-  it("canNavigate next month is false when next month ends past sync window", () => {
-    // Window half-open end = 2026-08-15. August range is [08-01, 09-01) which extends past.
-    // From July, next month (August) should be blocked because August's rangeEnd > window.end.
-    assert.equal(canNavigate("month", NOW, 1, NOW), false);
-    assert.equal(canNavigate("month", NOW, -1, NOW), false); // June starts before window
+  it("canNavigate week blocks a neighbor entirely past the window end", () => {
+    // Window ends 2026-08-15 (exclusive). Week [Aug 9, Aug 16) still overlaps.
+    const aug12 = startOfLocalDay(new Date("2026-08-12T09:00:00.000Z"));
+    assert.equal(canNavigate("week", aug12, -1, NOW), true); // [Aug 2, Aug 9)
+    // Next week [Aug 16, Aug 23) starts at/after window end → blocked.
+    assert.equal(canNavigate("week", aug12, 1, NOW), false);
   });
 
-  it("canNavigate allows current week prev/next when both neighbor weeks fit", () => {
-    // Pick an anchor whose prev and next weeks both sit inside [Jul 14, Aug 15)
-    // Week of Jul 19–25: prev = Jul 12–19 starts Jul 12 < Jul 14 → prev false
-    // Week of Jul 26 – Aug 1: start Jul 26 >= Jul 14, end Aug 2 < Aug 15 → both?
-    //   prev week Jul 19–26: start Jul 19 OK; next week Aug 2–9: end Aug 9 OK
+  it("canNavigate week still allows fully contained neighbors", () => {
     const mid = startOfLocalDay(new Date("2026-07-28T09:00:00.000Z"));
     assert.equal(canNavigate("week", mid, -1, NOW), true);
     assert.equal(canNavigate("week", mid, 1, NOW), true);
+  });
+
+  it("canNavigate month allows next month because August overlaps the window", () => {
+    // August is [Aug 1, Sep 1); the window covers Aug 1–14, so overlap → allowed.
+    // Under the old containment rule this was false, which made month arrows
+    // permanently disabled (a 31-day window can never contain a full month).
+    assert.equal(canNavigate("month", NOW, 1, NOW), true);
+    // June is [Jun 1, Jul 1) — ends before the window starts → blocked.
+    assert.equal(canNavigate("month", NOW, -1, NOW), false);
+  });
+
+  it("canNavigate month stops one month past the window", () => {
+    const aug = startOfLocalDay(new Date("2026-08-15T09:00:00.000Z"));
+    // Back to July: [Jul 1, Aug 1) overlaps Jul 14–31 → allowed.
+    assert.equal(canNavigate("month", aug, -1, NOW), true);
+    // Forward to September: [Sep 1, Oct 1) starts after window end → blocked.
+    assert.equal(canNavigate("month", aug, 1, NOW), false);
+  });
+});
+
+describe("isDayInSyncWindow", () => {
+  const day = (iso: string) => startOfLocalDay(new Date(iso));
+
+  it("marks days inside [yesterday, today+30] as cached", () => {
+    assert.equal(isDayInSyncWindow(day("2026-07-14T09:00:00.000Z"), NOW), true); // window start
+    assert.equal(isDayInSyncWindow(day("2026-07-15T09:00:00.000Z"), NOW), true); // today
+    assert.equal(isDayInSyncWindow(day("2026-08-14T09:00:00.000Z"), NOW), true); // last covered day
+  });
+
+  it("marks days outside the window as uncached", () => {
+    assert.equal(isDayInSyncWindow(day("2026-07-13T09:00:00.000Z"), NOW), false);
+    assert.equal(isDayInSyncWindow(day("2026-08-15T09:00:00.000Z"), NOW), false); // exclusive end
+    assert.equal(isDayInSyncWindow(day("2026-09-01T09:00:00.000Z"), NOW), false);
+  });
+
+  it("accepts any instant within the day, not just local midnight", () => {
+    // 2026-08-14 22:00 UTC is still 2026-08-15 01:00 Jerusalem → outside.
+    assert.equal(isDayInSyncWindow(new Date("2026-08-14T22:00:00.000Z"), NOW), false);
+    assert.equal(isDayInSyncWindow(new Date("2026-08-14T12:00:00.000Z"), NOW), true);
+  });
+});
+
+describe("syncWindowLabel", () => {
+  it("describes the cached window in Hebrew", () => {
+    const label = syncWindowLabel(NOW);
+    assert.match(label, /יולי/);
+    assert.match(label, /אוגוסט/);
   });
 });
 
