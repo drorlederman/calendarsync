@@ -26,6 +26,13 @@ describe("dayKey / startOfLocalDay", () => {
     assert.equal(dayKey(start), "2026-07-15");
     assert.equal(start.toISOString(), "2026-07-14T21:00:00.000Z"); // IDT = UTC+3 in July
   });
+
+  it("startOfLocalDay is correct on spring-forward DST transition day", () => {
+    // Israel spring forward 2026-03-27 (02:00 → 03:00). Noon local ≈ 10:00 UTC (IST, UTC+2).
+    const start = startOfLocalDay(new Date("2026-03-27T10:00:00.000Z"));
+    assert.equal(dayKey(start), "2026-03-27");
+    assert.equal(start.toISOString(), "2026-03-26T22:00:00.000Z"); // midnight still IST (UTC+2)
+  });
 });
 
 describe("getWeekRange", () => {
@@ -74,6 +81,15 @@ describe("shiftAnchor / canNavigate", () => {
     assert.equal(dayKey(next), "2026-08-15");
     const prev = shiftAnchor("month", NOW, -1);
     assert.equal(dayKey(prev), "2026-06-15");
+  });
+
+  it("shiftAnchor month clamps to last day of short months", () => {
+    const jan31 = startOfLocalDay(new Date("2026-01-31T10:00:00.000Z"));
+    assert.equal(dayKey(jan31), "2026-01-31");
+    const feb = shiftAnchor("month", jan31, 1);
+    assert.equal(dayKey(feb), "2026-02-28"); // 2026 is not a leap year
+    const backToJan = shiftAnchor("month", feb, -1);
+    assert.equal(dayKey(backToJan), "2026-01-28"); // clamped anchor lands on Jan 28, not Jan 31
   });
 
   it("canNavigate prev week is false when previous week starts before sync window", () => {

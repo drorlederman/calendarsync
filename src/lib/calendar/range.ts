@@ -27,20 +27,50 @@ function zoneParts(date: Date): { dateStr: string; dayOfWeek: number; year: numb
   };
 }
 
-/** Midnight of the Jerusalem calendar day containing `date`, as a UTC Date. */
-export function startOfLocalDay(date: Date): Date {
-  const { dateStr } = zoneParts(date);
-  // Probe: interpret dateStr as UTC midnight, then subtract the Jerusalem offset at that instant.
-  const utcMidnightGuess = new Date(`${dateStr}T00:00:00Z`);
-  const offsetFmt = new Intl.DateTimeFormat("en-US", {
+function localTimeParts(date: Date): { year: number; month: number; day: number; hour: number; minute: number } {
+  const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
   });
-  const op = Object.fromEntries(offsetFmt.formatToParts(utcMidnightGuess).map((p) => [p.type, p.value]));
-  const guessMinutes = (parseInt(op.hour, 10) % 24) * 60 + parseInt(op.minute, 10);
-  return new Date(utcMidnightGuess.getTime() - guessMinutes * 60 * 1000);
+  const parts = Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
+  return {
+    year: parseInt(parts.year, 10),
+    month: parseInt(parts.month, 10),
+    day: parseInt(parts.day, 10),
+    hour: parseInt(parts.hour, 10) % 24,
+    minute: parseInt(parts.minute, 10),
+  };
+}
+
+function toDayNumber(year: number, month: number, day: number): number {
+  return Math.floor(Date.UTC(year, month - 1, day) / 86_400_000);
+}
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/** Midnight of the Jerusalem calendar day containing `date`, as a UTC Date. */
+export function startOfLocalDay(date: Date): Date {
+  const { year, month, day } = zoneParts(date);
+  const targetDay = toDayNumber(year, month, day);
+  // Anchor near local midnight (covers UTC+2/+3); iterate using offset at the probe instant.
+  let ms = Date.UTC(year, month - 1, day - 1, 21, 0, 0);
+  for (let i = 0; i < 4; i++) {
+    const lp = localTimeParts(new Date(ms));
+    if (lp.year === year && lp.month === month && lp.day === day && lp.hour === 0 && lp.minute === 0) {
+      break;
+    }
+    const currentDay = toDayNumber(lp.year, lp.month, lp.day);
+    const minuteDiff = (targetDay - currentDay) * 24 * 60 - (lp.hour * 60 + lp.minute);
+    ms += minuteDiff * 60 * 1000;
+  }
+  return new Date(ms);
 }
 
 export function dayKey(date: Date): string {
@@ -90,8 +120,17 @@ export function getSyncWindow(now: Date = new Date()): SyncWindow {
 export function shiftAnchor(view: "week" | "month", anchor: Date, direction: -1 | 1): Date {
   if (view === "week") return addLocalDays(startOfLocalDay(anchor), direction * 7);
   const p = zoneParts(anchor);
-  // Land on the same day-of-month in the neighbor month (clamp via Date.UTC overflow is fine for anchor).
-  const shifted = new Date(Date.UTC(p.year, p.month - 1 + direction, p.day, 12, 0, 0));
+  let targetMonth = p.month + direction;
+  let targetYear = p.year;
+  if (targetMonth > 12) {
+    targetMonth = 1;
+    targetYear += 1;
+  } else if (targetMonth < 1) {
+    targetMonth = 12;
+    targetYear -= 1;
+  }
+  const clampedDay = Math.min(p.day, daysInMonth(targetYear, targetMonth));
+  const shifted = new Date(Date.UTC(targetYear, targetMonth - 1, clampedDay, 12, 0, 0));
   return startOfLocalDay(shifted);
 }
 
