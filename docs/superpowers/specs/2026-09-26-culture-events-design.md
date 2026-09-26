@@ -34,7 +34,7 @@ interface CultureSource {
 type CultureRegion = "tel-aviv" | "sharon" | "center" | "jerusalem" | "haifa-north" | "south";
 ```
 
-- נטען מ-`functions/src/culture/sources.seed.ts` באמצעות סקריפט (`functions/scripts/seedCultureSources.ts`), upsert לפי `sourceId`.
+- מוגדר בקוד ב-`functions/src/culture/catalog.ts` ומסונכרן ל-Firestore בתחילת כל ריצת סריקה (merge; מקור שהוסר מהקוד מסומן `enabled:false`). אין סקריפט seed נפרד.
 - קטלוג ראשוני (כתובות URL מדויקות ייקבעו ויאומתו בשלב התוכנית): זאפה (תל אביב, הרצליה, ירושלים, חיפה), צוותא תל אביב, סינמה סיטי (סניפים לפי אזור), יס פלאנט, סינמטק תל אביב, הבימה, הקאמרי, גשר, בית ליסין, היכל התרבות הרצליה/כפר סבא, בארבי.
 
 ### `cultureEvents/{eventId}` — אירועים שנסרקו (משותף לכל המשתמשים)
@@ -48,10 +48,12 @@ interface CultureEvent {
   city: string;
   region: CultureRegion;
   dates: Timestamp[];      // מופעים ב-14 הימים הקרובים
+  firstDate: Timestamp;
+  lastDate: Timestamp;     // לשאילתת מחיקת אירועים שעברו
   url: string;             // קישור לעמוד האירוע/כרטיסים (אותו דומיין כמו המקור)
   description?: string;
   review: { score: "positive" | "mixed" | "negative"; summary: string; outlet: string } | null;
-  reviewCheckedAt?: Timestamp;
+  reviewPending: boolean;  // true ביצירה לקולנוע/תיאטרון, עד שחיפוש הביקורת רץ
   recommended: boolean;
   firstSeenAt: Timestamp;
   lastSeenAt: Timestamp;
@@ -94,16 +96,17 @@ interface CultureSettings {
 
 1. קורא את כל `settings` עם `culture.enabled` ואוסף את איחוד `sourceIds`.
 2. לכל מקור פעיל שנבחר (עד `MAX_SOURCES_PER_RUN`), עם concurrency מוגבל (3):
-   - `scanSource(source)` → קריאה ל-Claude (Sonnet 5, כלי web fetch) שמחזירה JSON של אירועים ב-14 הימים הקרובים.
+   - `scanSource(source)` → קריאה ל-Claude (`claude-opus-5` עם `fallbacks: "default"`, כלי web fetch) שמחזירה JSON של אירועים ב-14 הימים הקרובים.
    - `validateScanResult` מסנן פריטים לא תקינים (שדות חובה, תאריכים תקינים ובטווח, URL מאותו דומיין).
    - upsert ל-`cultureEvents`; עדכון `lastScan` ו-`consecutiveFailures`.
    - כישלון: נרשם, ממשיכים הלאה; אירועים קיימים של המקור נשמרים.
-3. חיפוש ביקורות: לאירועים בקטגוריות `cinema`/`theater` שאין להם `reviewCheckedAt` (עד `MAX_REVIEW_LOOKUPS_PER_RUN`) → `lookupReview(event)` (Claude + web search, `max_uses` מוגבל) → מעדכן `review`, `recommended = review?.score === "positive"`, `reviewCheckedAt`.
+3. חיפוש ביקורות: לאירועים עם `reviewPending == true` (עד `MAX_REVIEW_LOOKUPS_PER_RUN`) → `lookupReview(event)` (Claude + web search, `max_uses` מוגבל) → מעדכן `review`, `recommended = review?.score === "positive"`, `reviewPending = false`.
 4. מחיקת אירועים שעברו.
 
 - הקריאות ל-Claude עטופות ב-`functions/src/culture/claudeScanner.ts` (ממשק `scanSource`, `lookupReview`) כדי לאפשר mock.
 - סוד חדש: `ANTHROPIC_API_KEY` דרך `defineSecret`. תלות חדשה: `@anthropic-ai/sdk`.
-- timeout מוגדל לפונקציה (540 שניות).
+- timeout מוגדל לפונקציה (1800 שניות), ותקציב עבודה של 25 דקות.
+- המודל מוגדר בקבוע יחיד `CULTURE_MODEL`; מעבר ל-`claude-sonnet-5` הוא שינוי של שורה אחת.
 
 ### 2. שליחת WhatsApp — בתוך `whatsappSchedulerTick` הקיים
 
@@ -160,8 +163,7 @@ interface CultureSettings {
 ## קבצים
 
 חדשים:
-- `functions/src/culture/types.ts`, `sources.seed.ts`, `claudeScanner.ts`, `scan.ts` (`cultureDailyScan`), `select.ts`, `message.ts`, `schedule.ts`, ו-`*.test.ts` מתאימים
-- `functions/scripts/seedCultureSources.ts`
+- `functions/src/culture/types.ts`, `catalog.ts`, `time.ts`, `scanResult.ts`, `claudeScanner.ts`, `scan.ts` (`cultureDailyScan`), `select.ts`, `message.ts`, `schedule.ts`, `notify.ts`, ו-`*.test.ts` מתאימים
 - `app/(app)/culture/page.tsx`
 - `src/components/settings/CultureSection.tsx`, `src/components/culture/*`
 
