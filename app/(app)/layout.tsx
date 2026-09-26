@@ -5,7 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/lib/firebase/auth-context";
 import Link from "next/link";
 import {
-  CalendarDays, Inbox, Bell, Settings, LogOut, Menu, X, MessagesSquare,
+  CalendarDays, Inbox, Bell, Settings, LogOut, Menu, X, MessagesSquare, Ticket,
 } from "lucide-react";
 
 const NAV = [
@@ -13,6 +13,7 @@ const NAV = [
   { href: "/inbox",     label: "דואר",     Icon: Inbox },
   { href: "/reminders", label: "תזכורות",  Icon: Bell },
   { href: "/slack",     label: "סלאק",     Icon: MessagesSquare },
+  { href: "/culture",   label: "תרבות",    Icon: Ticket },
   { href: "/settings",  label: "הגדרות",  Icon: Settings },
 ];
 
