@@ -1,4 +1,5 @@
 import type { Timestamp } from "firebase/firestore";
+import { type CultureSettings, DEFAULT_CULTURE_SETTINGS } from "./culture";
 
 export type Provider = "google" | "microsoft" | "slack";
 export type AccountStatus = "active" | "reauth_required" | "error";
@@ -36,12 +37,14 @@ export interface SettingsDoc {
   whatsapp: { enabled: boolean; phone: string };
   reminders: { offsetsMinutes: number[] };
   digest: { enabled: boolean; frequency: "daily" | "weekdays"; times: string[] };
+  culture: CultureSettings;
 }
 
 export const DEFAULT_SETTINGS: SettingsDoc = {
   whatsapp: { enabled: false, phone: "" },
   reminders: { offsetsMinutes: [15, 1440] },
   digest: { enabled: false, frequency: "daily", times: ["07:30"] },
+  culture: DEFAULT_CULTURE_SETTINGS,
 };
 
 export type ReminderStatus = "open" | "done";

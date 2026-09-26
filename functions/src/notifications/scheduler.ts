@@ -352,6 +352,7 @@ export const whatsappSchedulerTick = functions.scheduler.onSchedule(
         whatsapp: raw.whatsapp ?? DEFAULT_SETTINGS.whatsapp,
         reminders: raw.reminders ?? DEFAULT_SETTINGS.reminders,
         digest: raw.digest ?? DEFAULT_SETTINGS.digest,
+        culture: { ...DEFAULT_SETTINGS.culture, ...(raw.culture ?? {}) },
       };
       if (!settings.whatsapp.enabled || !settings.whatsapp.phone) continue;
       try {
