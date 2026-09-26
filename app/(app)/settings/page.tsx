@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/firebase/auth-context";
 import ConnectedAccountsSection from "@/components/settings/ConnectedAccountsSection";
 import RemindersSection from "@/components/settings/RemindersSection";
 import DigestSection from "@/components/settings/DigestSection";
+import CultureSection from "@/components/settings/CultureSection";
 import WhatsAppSection from "@/components/settings/WhatsAppSection";
 
 export default function SettingsPage() {
@@ -55,6 +56,7 @@ export default function SettingsPage() {
       <ConnectedAccountsSection />
       <RemindersSection />
       <DigestSection />
+      <CultureSection />
       <WhatsAppSection />
 
       <div className="rounded-2xl p-6" style={{ background: "#FEF2F2", border: "1px solid #FECACA" }}>

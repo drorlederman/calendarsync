@@ -72,3 +72,17 @@ export interface ClientCultureEvent {
   review: { score: "positive" | "mixed" | "negative"; summary: string; outlet: string } | null;
   recommended: boolean;
 }
+
+export function filterSources(
+  sources: ClientCultureSource[], regions: CultureRegion[], types: CultureType[],
+): ClientCultureSource[] {
+  return sources.filter((s) =>
+    s.enabled &&
+    (regions.length === 0 || s.regions.some((r) => regions.includes(r))) &&
+    (types.length === 0 || types.includes(s.type)),
+  );
+}
+
+export function nextDateInRange(dates: Date[], from: Date, to: Date | null): Date | null {
+  return dates.find((d) => d >= from && (to === null || d < to)) ?? null;
+}

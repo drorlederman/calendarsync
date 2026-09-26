@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:calendar-range": "tsx --test src/lib/calendar/range.test.ts"
+    "test:calendar-range": "tsx --test src/lib/calendar/range.test.ts",
+    "test:culture": "tsx --test src/lib/culture.test.ts"
   },
   "dependencies": {
     "firebase": "^12.15.0",
