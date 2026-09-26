@@ -80,6 +80,24 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // ─── /cultureSources/{id} , /cultureEvents/{id} ─────────────────────────
+    // Shared culture catalog and scanned events — any signed-in user may read;
+    // written only by the cultureDailyScan Cloud Function.
+    match /cultureSources/{id} {
+      allow read:  if isAuth();
+      allow write: if false;
+    }
+    match /cultureEvents/{id} {
+      allow read:  if isAuth();
+      allow write: if false;
+    }
+
+    // ─── /cultureSentLog/{uid} ──────────────────────────────────────────────
+    // Culture WhatsApp dedup log — Cloud Functions only.
+    match /cultureSentLog/{uid} {
+      allow read, write: if false;
+    }
+
     // ─── /oauthState/{stateId} ──────────────────────────────────────────────
     // Short-lived CSRF state for the OAuth connect flow — Cloud Functions only.
     match /oauthState/{stateId} {

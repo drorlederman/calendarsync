@@ -6,6 +6,7 @@ import { sendWhatsApp, WhatsAppQuotaExceededError, greenApiUrl, greenApiInstance
 import { TIMEZONE, zoneParts, localDayBoundsUtc, fmtTime, fmtDateTime } from "./timezone";
 import { pruneNagKeys, shouldFireNag } from "./nag";
 import { ensureCompletionCode } from "./ensureCompletionCode";
+import { processCulture } from "../culture/notify";
 
 const TICK_WINDOW_MS = 5 * 60 * 1000;
 // Task alerts fire on the first tick at-or-after their due moment (grace
@@ -363,7 +364,8 @@ export const whatsappSchedulerTick = functions.scheduler.onSchedule(
         // on the next tick once quota resets.
         const remindersQuota = await processReminders(uid, settings, now, apiUrl, instanceId, token);
         const tasksQuota = remindersQuota || await processTaskReminders(uid, settings, now, apiUrl, instanceId, token);
-        if (!tasksQuota) await processDigest(uid, settings, now, apiUrl, instanceId, token);
+        const digestQuota = tasksQuota || await processDigest(uid, settings, now, apiUrl, instanceId, token);
+        if (!digestQuota) await processCulture(uid, settings, now, apiUrl, instanceId, token);
       } catch (err) {
         console.error(`WhatsApp scheduler error for user ${uid}:`, err);
       }
