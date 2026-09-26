@@ -44,6 +44,58 @@ export const DEFAULT_SETTINGS: SettingsDoc = {
   digest: { enabled: false, frequency: "daily", times: ["07:30"] },
 };
 
+export type ReminderStatus = "open" | "done";
+export type ReminderLevel = "low" | "medium" | "high";
+/** @deprecated Prefer urgency/importance. Kept optional for documents written before the split. */
+export type ReminderPriority = "normal" | "high";
+export type ReminderSourceType = "email" | "event" | "manual" | "fintics";
+
+export interface ReminderSource {
+  type: ReminderSourceType;
+  accountId?: string;     // connectedAccount the email belongs to
+  messageId?: string;     // Gmail/Graph message id
+  eventId?: string;       // events/{id} document id
+  transactionId?: string; // fintics transaction id (cross-app: flagged expense)
+  label?: string;         // human-readable: email subject / event title / expense
+  link?: string | null;   // direct link (joinUrl / deep link into the source app)
+}
+
+export interface ReminderDoc {
+  uid: string;
+  title: string;
+  notes: string | null;
+  dueAt: Timestamp | null;          // deadline for the task
+  remindAt: Timestamp | null;       // explicit "remind me at" instant
+  leadOffsetsMinutes: number[];     // extra alerts this many minutes before dueAt
+  status: ReminderStatus;
+  completedAt: Timestamp | null;
+  urgency: ReminderLevel;
+  importance: ReminderLevel;
+  nagEnabled: boolean;
+  /** Short code for completing the reminder via WhatsApp reply (e.g. "בוצע AB12"). */
+  completionCode?: string;
+  /** @deprecated Prefer urgency/importance. Present only on older documents. */
+  priority?: ReminderPriority;
+  source: ReminderSource | null;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export function resolveReminderLevel(
+  explicit: ReminderLevel | undefined,
+  legacyPriority: ReminderPriority | undefined,
+  fallback: ReminderLevel = "medium",
+): ReminderLevel {
+  if (explicit === "low" || explicit === "medium" || explicit === "high") return explicit;
+  if (legacyPriority === "high") return "high";
+  if (legacyPriority === "normal") return "medium";
+  return fallback;
+}
+
+export function shouldAutoEnableNag(urgency: ReminderLevel, importance: ReminderLevel): boolean {
+  return urgency === "high" || importance === "high";
+}
+
 export interface InboxMessage {
   id: string;
   accountId: string;

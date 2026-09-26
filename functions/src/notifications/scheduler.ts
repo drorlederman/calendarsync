@@ -1,11 +1,17 @@
 import * as functions from "firebase-functions/v2";
 import * as admin from "firebase-admin";
 import { db } from "../firebase";
-import { EventDoc, SettingsDoc, DEFAULT_SETTINGS } from "../types";
-import { sendWhatsApp, greenApiUrl, greenApiInstance, greenApiToken } from "./whatsapp";
-import { TIMEZONE, zoneParts, localDayBoundsUtc, fmtTime } from "./timezone";
+import { EventDoc, ReminderDoc, SettingsDoc, DEFAULT_SETTINGS, resolveReminderLevel } from "../types";
+import { sendWhatsApp, WhatsAppQuotaExceededError, greenApiUrl, greenApiInstance, greenApiToken } from "./whatsapp";
+import { TIMEZONE, zoneParts, localDayBoundsUtc, fmtTime, fmtDateTime } from "./timezone";
+import { pruneNagKeys, shouldFireNag } from "./nag";
+import { ensureCompletionCode } from "./ensureCompletionCode";
 
 const TICK_WINDOW_MS = 5 * 60 * 1000;
+// Task alerts fire on the first tick at-or-after their due moment (grace
+// window), so a missed tick still delivers — but never for moments more than
+// this stale, to avoid a flood of ancient alerts after a long outage.
+const TASK_GRACE_MS = 24 * 60 * 60 * 1000;
 
 function fmtOffset(minutes: number): string {
   if (minutes % (24 * 60) === 0) {
@@ -27,6 +33,40 @@ function buildReminderMessage(event: EventDoc, offsetMinutes: number): string {
   lines.push(`🕐 ${fmtTime(event.start.toDate(), TIMEZONE)}`);
   if (event.location) lines.push(`📍 ${event.location}`);
   if (event.joinUrl) lines.push(`🔗 ${event.joinUrl}`);
+  return lines.join("\n");
+}
+
+// Task/reminder alert — deliberately distinct from the meeting reminder above:
+// 🔔 (not ⏰) plus a colour dot (🔴 high / 🟠 normal) so it reads as its own
+// kind at a glance, matching the accent colour the reminders screen uses.
+function reminderDot(reminder: ReminderDoc): string {
+  const urgency = resolveReminderLevel(reminder.urgency, reminder.priority);
+  const importance = resolveReminderLevel(reminder.importance, reminder.priority);
+  return urgency === "high" || importance === "high" ? "🔴" : "🟠";
+}
+
+function buildTaskMessage(
+  reminder: ReminderDoc,
+  kind: "remindAt" | "lead" | "nag",
+  opts?: { offsetMinutes?: number; completionCode?: string },
+): string {
+  const offsetMinutes = opts?.offsetMinutes;
+  const completionCode = opts?.completionCode ?? reminder.completionCode;
+  const dot = reminderDot(reminder);
+  const header = kind === "nag"
+    ? `🔔 ${dot} נודניק יומי — עדיין פתוח`
+    : kind === "lead" && offsetMinutes && offsetMinutes > 0
+      ? `🔔 ${dot} תזכורת משימה — ${fmtOffset(offsetMinutes)} לפני היעד`
+      : `🔔 ${dot} תזכורת משימה`;
+  const lines: string[] = [header, "", `📌 ${reminder.title}`];
+  if (reminder.dueAt) lines.push(`🗓️ יעד: ${fmtDateTime(reminder.dueAt.toDate(), TIMEZONE)}`);
+  if (reminder.notes) lines.push(`📝 ${reminder.notes}`);
+  if (reminder.source?.link) lines.push(`🔗 ${reminder.source.link}`);
+  else if (reminder.source?.label) lines.push(`↩️ ${reminder.source.label}`);
+  if (completionCode) {
+    lines.push("");
+    lines.push(`לסיום השב: בוצע ${completionCode}`);
+  }
   return lines.join("\n");
 }
 
@@ -60,11 +100,14 @@ async function countTodaySlackAlerts(uid: string, start: Date, end: Date): Promi
   return snap.docs.filter((d) => d.data().isDM || d.data().isMention).length;
 }
 
+// Returns true when Green API's correspondents quota was hit mid-batch — the
+// caller uses that to skip the rest of this tick's sends for this user
+// rather than throwing more of the same failure at Green API.
 async function processReminders(
   uid: string, settings: SettingsDoc, now: Date, apiUrl: string, instanceId: string, token: string
-): Promise<void> {
+): Promise<boolean> {
   const offsets = settings.reminders.offsetsMinutes;
-  if (offsets.length === 0) return;
+  if (offsets.length === 0) return false;
   const maxOffset = Math.max(...offsets);
   const windowEnd = new Date(now.getTime() + maxOffset * 60 * 1000 + TICK_WINDOW_MS);
 
@@ -73,13 +116,15 @@ async function processReminders(
     .where("start", ">=", admin.firestore.Timestamp.fromDate(now))
     .where("start", "<=", admin.firestore.Timestamp.fromDate(windowEnd))
     .get();
-  if (eventsSnap.empty) return;
+  if (eventsSnap.empty) return false;
 
   const sentLogRef = db.doc(`sentLog/${uid}`);
   const sentLogSnap = await sentLogRef.get();
   const sentReminders: Record<string, boolean> = (sentLogSnap.data()?.reminders as Record<string, boolean>) ?? {};
   const newlySent: Record<string, boolean> = {};
+  let quotaExceeded = false;
 
+  outer:
   for (const doc of eventsSnap.docs) {
     const event = doc.data() as EventDoc;
     if (event.status !== "confirmed") continue;
@@ -95,14 +140,139 @@ async function processReminders(
       const key = `${doc.id}_${offsetMinutes}_${startMs}`;
       if (sentReminders[key] || newlySent[key]) continue;
 
-      await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, buildReminderMessage(event, offsetMinutes));
+      try {
+        await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, buildReminderMessage(event, offsetMinutes));
+      } catch (err) {
+        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
+        console.warn(`WhatsApp quota exceeded (uid=${uid}) — reminder "${key}" not delivered, will retry later`, err.detail);
+        quotaExceeded = true;
+        break outer;
+      }
       newlySent[key] = true;
     }
   }
 
+  // Persist whatever did go out before hitting quota — only the failed one
+  // (and anything not yet attempted) is left unmarked, so it retries later.
   if (Object.keys(newlySent).length > 0) {
     await sentLogRef.set({ reminders: newlySent }, { merge: true });
   }
+  return quotaExceeded;
+}
+
+type TaskFire = { key: string; at: number; kind: "remindAt" | "lead"; offsetMinutes?: number };
+
+// All the moments a reminder should alert at: its explicit "remind me at"
+// instant, plus dueAt minus each configured lead offset. The dueMs/remindMs
+// baked into each key means editing a date yields fresh keys automatically —
+// same reschedule-safety trick as processReminders.
+function taskFireTimes(id: string, r: ReminderDoc): TaskFire[] {
+  const out: TaskFire[] = [];
+  if (r.remindAt) {
+    const ms = r.remindAt.toMillis();
+    out.push({ key: `${id}_remindAt_${ms}`, at: ms, kind: "remindAt" });
+  }
+  if (r.dueAt) {
+    const dueMs = r.dueAt.toMillis();
+    for (const off of r.leadOffsetsMinutes ?? []) {
+      out.push({ key: `${id}_lead_${off}_${dueMs}`, at: dueMs - off * 60 * 1000, kind: "lead", offsetMinutes: off });
+    }
+  }
+  return out;
+}
+
+async function processTaskReminders(
+  uid: string, settings: SettingsDoc, now: Date, apiUrl: string, instanceId: string, token: string
+): Promise<boolean> {
+  const snap = await db.collection("reminders")
+    .where("uid", "==", uid)
+    .where("status", "==", "open")
+    .get();
+  if (snap.empty) return false;
+
+  const sentLogRef = db.doc(`sentLog/${uid}`);
+  const sentLogSnap = await sentLogRef.get();
+  const sentTasks: Record<string, boolean> = (sentLogSnap.data()?.tasks as Record<string, boolean>) ?? {};
+  const newlySent: Record<string, boolean> = {};
+  const nowMs = now.getTime();
+  const todayStr = zoneParts(now, TIMEZONE).dateStr;
+  // Track the last reminder we actually messaged about this tick, so a bare
+  // "בוצע" reply (no code) can complete the reminder the user was just nudged on.
+  let lastNotifiedReminderId: string | null = null;
+  let quotaExceeded = false;
+
+  outer:
+  for (const doc of snap.docs) {
+    const reminder = doc.data() as ReminderDoc;
+    let code: string | undefined = reminder.completionCode;
+    const ensureCode = async () => {
+      if (code) return code;
+      code = await ensureCompletionCode(doc.id, reminder);
+      return code;
+    };
+
+    for (const fire of taskFireTimes(doc.id, reminder)) {
+      if (fire.at > nowMs) continue;                 // not due yet
+      if (nowMs - fire.at > TASK_GRACE_MS) continue; // too stale to alert about now
+      if (sentTasks[fire.key] || newlySent[fire.key]) continue;
+      const completionCode = await ensureCode();
+      try {
+        await sendWhatsApp(
+          apiUrl, instanceId, token, settings.whatsapp.phone,
+          buildTaskMessage(reminder, fire.kind, { offsetMinutes: fire.offsetMinutes, completionCode })
+        );
+      } catch (err) {
+        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
+        console.warn(`WhatsApp quota exceeded (uid=${uid}) — task "${fire.key}" not delivered, will retry later`, err.detail);
+        quotaExceeded = true;
+        break outer;
+      }
+      newlySent[fire.key] = true;
+      lastNotifiedReminderId = doc.id;
+    }
+
+    const nag = shouldFireNag({
+      reminderId: doc.id,
+      reminder: {
+        nagEnabled: reminder.nagEnabled,
+        status: reminder.status,
+        remindAt: reminder.remindAt,
+        dueAt: reminder.dueAt,
+        createdAt: reminder.createdAt as { toDate?: () => Date } | null,
+      },
+      now,
+      timeZone: TIMEZONE,
+    });
+    if (nag.fire && nag.key && !sentTasks[nag.key] && !newlySent[nag.key]) {
+      const completionCode = await ensureCode();
+      try {
+        await sendWhatsApp(
+          apiUrl, instanceId, token, settings.whatsapp.phone,
+          buildTaskMessage(reminder, "nag", { completionCode })
+        );
+      } catch (err) {
+        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
+        console.warn(`WhatsApp quota exceeded (uid=${uid}) — nag "${nag.key}" not delivered, will retry later`, err.detail);
+        quotaExceeded = true;
+        break outer;
+      }
+      newlySent[nag.key] = true;
+      lastNotifiedReminderId = doc.id;
+    }
+  }
+
+  if (lastNotifiedReminderId) {
+    await sentLogRef.set(
+      { lastTask: { reminderId: lastNotifiedReminderId, at: nowMs } },
+      { merge: true }
+    );
+  }
+
+  if (Object.keys(newlySent).length > 0) {
+    const merged = pruneNagKeys({ ...sentTasks, ...newlySent }, todayStr);
+    await sentLogRef.set({ tasks: merged }, { merge: true });
+  }
+  return quotaExceeded;
 }
 
 // "weekdays" follows the Israeli work week (Sunday–Thursday), not the
@@ -113,10 +283,10 @@ function isIsraeliWorkday(dayOfWeek: number): boolean {
 
 async function processDigest(
   uid: string, settings: SettingsDoc, now: Date, apiUrl: string, instanceId: string, token: string
-): Promise<void> {
-  if (!settings.digest.enabled || settings.digest.times.length === 0) return;
+): Promise<boolean> {
+  if (!settings.digest.enabled || settings.digest.times.length === 0) return false;
   const parts = zoneParts(now, TIMEZONE);
-  if (settings.digest.frequency === "weekdays" && !isIsraeliWorkday(parts.dayOfWeek)) return;
+  if (settings.digest.frequency === "weekdays" && !isIsraeliWorkday(parts.dayOfWeek)) return false;
 
   const nowMinutes = parts.hour * 60 + parts.minute;
   const dueTimes = settings.digest.times.filter((time) => {
@@ -124,13 +294,13 @@ async function processDigest(
     const targetMinutes = (hh || 0) * 60 + (mm || 0);
     return nowMinutes >= targetMinutes && nowMinutes < targetMinutes + 5;
   });
-  if (dueTimes.length === 0) return;
+  if (dueTimes.length === 0) return false;
 
   const sentLogRef = db.doc(`sentLog/${uid}`);
   const sentLogSnap = await sentLogRef.get();
   const sentDigests: Record<string, boolean> = (sentLogSnap.data()?.digest as Record<string, boolean>) ?? {};
   const pending = dueTimes.filter((time) => !sentDigests[`${parts.dateStr}_${time}`]);
-  if (pending.length === 0) return;
+  if (pending.length === 0) return false;
 
   const { start, end } = localDayBoundsUtc(now, TIMEZONE);
   const eventsSnap = await db.collection("events")
@@ -144,11 +314,22 @@ async function processDigest(
   const message = buildDigestMessage(events, dateLabel, slackCount);
 
   const newlySent: Record<string, boolean> = {};
+  let quotaExceeded = false;
   for (const time of pending) {
-    await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, message);
+    try {
+      await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, message);
+    } catch (err) {
+      if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
+      console.warn(`WhatsApp quota exceeded (uid=${uid}) — digest for ${time} not delivered, will retry later`, err.detail);
+      quotaExceeded = true;
+      break;
+    }
     newlySent[`${parts.dateStr}_${time}`] = true;
   }
-  await sentLogRef.set({ digest: newlySent }, { merge: true });
+  if (Object.keys(newlySent).length > 0) {
+    await sentLogRef.set({ digest: newlySent }, { merge: true });
+  }
+  return quotaExceeded;
 }
 
 export const whatsappSchedulerTick = functions.scheduler.onSchedule(
@@ -162,11 +343,26 @@ export const whatsappSchedulerTick = functions.scheduler.onSchedule(
     const settingsSnap = await db.collection("settings").get();
     for (const doc of settingsSnap.docs) {
       const uid = doc.id;
-      const settings = doc.data() as SettingsDoc;
-      if (!settings.whatsapp?.enabled || !settings.whatsapp?.phone) continue;
+      // Settings docs written by individual UI sections only contain that
+      // section's field (e.g. WhatsAppSection writes just `whatsapp`), so
+      // `reminders`/`digest` can be missing or null. Fill from defaults so the
+      // processors never dereference undefined.
+      const raw = doc.data() as Partial<SettingsDoc>;
+      const settings: SettingsDoc = {
+        whatsapp: raw.whatsapp ?? DEFAULT_SETTINGS.whatsapp,
+        reminders: raw.reminders ?? DEFAULT_SETTINGS.reminders,
+        digest: raw.digest ?? DEFAULT_SETTINGS.digest,
+      };
+      if (!settings.whatsapp.enabled || !settings.whatsapp.phone) continue;
       try {
-        await processReminders(uid, settings, now, apiUrl, instanceId, token);
-        await processDigest(uid, settings, now, apiUrl, instanceId, token);
+        // Each processor returns true once it hits Green API's correspondents
+        // quota — skip the rest of this user's sends for the tick rather than
+        // repeating the same failure (and log spam) against every remaining
+        // reminder/digest. Nothing already sent is lost; the rest retries
+        // on the next tick once quota resets.
+        const remindersQuota = await processReminders(uid, settings, now, apiUrl, instanceId, token);
+        const tasksQuota = remindersQuota || await processTaskReminders(uid, settings, now, apiUrl, instanceId, token);
+        if (!tasksQuota) await processDigest(uid, settings, now, apiUrl, instanceId, token);
       } catch (err) {
         console.error(`WhatsApp scheduler error for user ${uid}:`, err);
       }
@@ -194,32 +390,88 @@ export const sendTestWhatsAppCallable = functions.https.onCall(
     const instanceId = greenApiInstance.value();
     const token = greenApiToken.value();
 
-    if (kind === "reminder") {
-      const now = admin.firestore.Timestamp.now();
-      const upcomingSnap = await db.collection("events")
-        .where("uid", "==", uid)
-        .where("start", ">=", now)
-        .orderBy("start", "asc")
-        .limit(5)
-        .get();
-      const upcoming = upcomingSnap.docs.map((d) => d.data() as EventDoc).find((e) => e.status === "confirmed");
-      const message = upcoming
-        ? buildReminderMessage(upcoming, settings.reminders.offsetsMinutes[0] ?? 15)
-        : "⏰ תזכורת לדוגמה — אין פגישה קרובה ביומן כרגע, אך כך תיראה הודעת תזכורת.\n\n📌 פגישת דוגמה\n🕐 14:00\n🔗 https://meet.google.com/abc-defg-hij";
-      await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, message);
-    } else {
-      const { start, end } = localDayBoundsUtc(new Date(), TIMEZONE);
-      const eventsSnap = await db.collection("events")
-        .where("uid", "==", uid)
-        .where("start", ">=", admin.firestore.Timestamp.fromDate(start))
-        .where("start", "<", admin.firestore.Timestamp.fromDate(end))
-        .get();
-      const events = eventsSnap.docs.map((d) => d.data() as EventDoc).filter((e) => e.status === "confirmed");
-      const slackCount = await countTodaySlackAlerts(uid, start, end);
-      const dateLabel = new Intl.DateTimeFormat("he-IL", { timeZone: TIMEZONE, day: "numeric", month: "long" }).format(new Date());
-      await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, buildDigestMessage(events, dateLabel, slackCount));
+    try {
+      if (kind === "reminder") {
+        const now = admin.firestore.Timestamp.now();
+        const upcomingSnap = await db.collection("events")
+          .where("uid", "==", uid)
+          .where("start", ">=", now)
+          .orderBy("start", "asc")
+          .limit(5)
+          .get();
+        const upcoming = upcomingSnap.docs.map((d) => d.data() as EventDoc).find((e) => e.status === "confirmed");
+        const message = upcoming
+          ? buildReminderMessage(upcoming, settings.reminders.offsetsMinutes[0] ?? 15)
+          : "⏰ תזכורת לדוגמה — אין פגישה קרובה ביומן כרגע, אך כך תיראה הודעת תזכורת.\n\n📌 פגישת דוגמה\n🕐 14:00\n🔗 https://meet.google.com/abc-defg-hij";
+        await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, message);
+      } else {
+        const { start, end } = localDayBoundsUtc(new Date(), TIMEZONE);
+        const eventsSnap = await db.collection("events")
+          .where("uid", "==", uid)
+          .where("start", ">=", admin.firestore.Timestamp.fromDate(start))
+          .where("start", "<", admin.firestore.Timestamp.fromDate(end))
+          .get();
+        const events = eventsSnap.docs.map((d) => d.data() as EventDoc).filter((e) => e.status === "confirmed");
+        const slackCount = await countTodaySlackAlerts(uid, start, end);
+        const dateLabel = new Intl.DateTimeFormat("he-IL", { timeZone: TIMEZONE, day: "numeric", month: "long" }).format(new Date());
+        await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, buildDigestMessage(events, dateLabel, slackCount));
+      }
+    } catch (err) {
+      if (err instanceof WhatsAppQuotaExceededError) {
+        throw new functions.https.HttpsError(
+          "resource-exhausted",
+          "מכסת ה-WhatsApp (Green API, תוכנית Developer) נגמרה החודש — שדרגו תוכנית או המתינו לאיפוס בתחילת החודש"
+        );
+      }
+      throw err;
     }
 
+    return { ok: true };
+  }
+);
+
+// Sends one reminder to WhatsApp immediately — powers the "send now" action on
+// a reminder card, and lets the user verify delivery without waiting for the
+// 5-minute tick.
+export const sendReminderNowCallable = functions.https.onCall(
+  { secrets: [greenApiUrl, greenApiInstance, greenApiToken] },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new functions.https.HttpsError("unauthenticated", "Sign in required");
+    const reminderId = request.data?.reminderId as string | undefined;
+    if (!reminderId) throw new functions.https.HttpsError("invalid-argument", "reminderId required");
+
+    const settingsSnap = await db.doc(`settings/${uid}`).get();
+    const settings = (settingsSnap.data() as SettingsDoc | undefined) ?? DEFAULT_SETTINGS;
+    if (!settings.whatsapp.enabled || !settings.whatsapp.phone) {
+      throw new functions.https.HttpsError("failed-precondition", "עדכוני WhatsApp כבויים או שלא הוגדר מספר בהגדרות");
+    }
+
+    const reminderSnap = await db.doc(`reminders/${reminderId}`).get();
+    const reminder = reminderSnap.data() as ReminderDoc | undefined;
+    if (!reminder || reminder.uid !== uid) {
+      throw new functions.https.HttpsError("not-found", "תזכורת לא נמצאה");
+    }
+
+    const completionCode = await ensureCompletionCode(reminderId, reminder);
+    try {
+      await sendWhatsApp(
+        greenApiUrl.value(), greenApiInstance.value(), greenApiToken.value(),
+        settings.whatsapp.phone, buildTaskMessage(reminder, "remindAt", { completionCode })
+      );
+    } catch (err) {
+      if (err instanceof WhatsAppQuotaExceededError) {
+        throw new functions.https.HttpsError(
+          "resource-exhausted",
+          "מכסת ה-WhatsApp (Green API, תוכנית Developer) נגמרה החודש — שדרגו תוכנית או המתינו לאיפוס בתחילת החודש"
+        );
+      }
+      throw err;
+    }
+    await db.doc(`sentLog/${uid}`).set(
+      { lastTask: { reminderId, at: Date.now() } },
+      { merge: true }
+    );
     return { ok: true };
   }
 );

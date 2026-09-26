@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+:root {
+  --brand-blue: #2563EB;
+  --brand-blue-soft: #EFF4FF;
+  --navy: #0D1321;
+  --text-secondary: #5B6477;
+  --background: #F8FAFC;
+  --card: #FFFFFF;
+  --border: #E8EDF5;
+  --success: #22C55E;
+  --error: #EF4444;
+}
+
+html[dir="rtl"] {
+  direction: rtl;
+  text-align: right;
+}
+
+html[dir="rtl"] input,
+html[dir="rtl"] textarea {
+  text-align: right;
+}
+
+body {
+  font-family: var(--font-heebo), system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html {
+  line-height: 1.6;
+  letter-spacing: 0.3px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand-blue);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

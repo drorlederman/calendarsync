@@ -60,6 +60,55 @@ export const DEFAULT_SETTINGS: SettingsDoc = {
 export interface SentLogDoc {
   reminders: Record<string, boolean>;
   digest: Record<string, boolean>;
+  tasks: Record<string, boolean>;
+}
+
+export type ReminderStatus = "open" | "done";
+export type ReminderLevel = "low" | "medium" | "high";
+/** @deprecated Prefer urgency/importance. Kept optional for documents written before the split. */
+export type ReminderPriority = "normal" | "high";
+export type ReminderSourceType = "email" | "event" | "manual" | "fintics";
+
+export interface ReminderSource {
+  type: ReminderSourceType;
+  accountId?: string;
+  messageId?: string;
+  eventId?: string;
+  transactionId?: string;
+  label?: string;
+  link?: string | null;
+}
+
+export interface ReminderDoc {
+  uid: string;
+  title: string;
+  notes: string | null;
+  dueAt: FirebaseFirestore.Timestamp | null;
+  remindAt: FirebaseFirestore.Timestamp | null;
+  leadOffsetsMinutes: number[];
+  status: ReminderStatus;
+  completedAt: FirebaseFirestore.Timestamp | null;
+  urgency: ReminderLevel;
+  importance: ReminderLevel;
+  nagEnabled: boolean;
+  /** Short code for completing the reminder via WhatsApp reply (e.g. "בוצע AB12"). */
+  completionCode?: string;
+  /** @deprecated Prefer urgency/importance. Present only on older documents. */
+  priority?: ReminderPriority;
+  source: ReminderSource | null;
+  createdAt: FirebaseFirestore.FieldValue | FirebaseFirestore.Timestamp;
+  updatedAt: FirebaseFirestore.FieldValue | FirebaseFirestore.Timestamp;
+}
+
+export function resolveReminderLevel(
+  explicit: ReminderLevel | undefined,
+  legacyPriority: ReminderPriority | undefined,
+  fallback: ReminderLevel = "medium",
+): ReminderLevel {
+  if (explicit === "low" || explicit === "medium" || explicit === "high") return explicit;
+  if (legacyPriority === "high") return "high";
+  if (legacyPriority === "normal") return "medium";
+  return fallback;
 }
 
 export interface SlackMessageDoc {

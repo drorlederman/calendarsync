@@ -5,14 +5,15 @@ import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/lib/firebase/auth-context";
 import Link from "next/link";
 import {
-  CalendarDays, Inbox, Settings, LogOut, Menu, X, MessagesSquare,
+  CalendarDays, Inbox, Bell, Settings, LogOut, Menu, X, MessagesSquare,
 } from "lucide-react";
 
 const NAV = [
-  { href: "/calendar", label: "יומן",    Icon: CalendarDays },
-  { href: "/inbox",    label: "דואר",    Icon: Inbox },
-  { href: "/slack",    label: "סלאק",    Icon: MessagesSquare },
-  { href: "/settings", label: "הגדרות", Icon: Settings },
+  { href: "/calendar",  label: "יומן",     Icon: CalendarDays },
+  { href: "/inbox",     label: "דואר",     Icon: Inbox },
+  { href: "/reminders", label: "תזכורות",  Icon: Bell },
+  { href: "/slack",     label: "סלאק",     Icon: MessagesSquare },
+  { href: "/settings",  label: "הגדרות",  Icon: Settings },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
