@@ -5,7 +5,7 @@ import { CatalogSource, CultureReview, CultureType } from "./types";
 export const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 
 // Single place to change the model (e.g. "claude-sonnet-5" to cut cost).
-export const CULTURE_MODEL = "claude-opus-5";
+export const CULTURE_MODEL = "claude-sonnet-5";
 const MAX_CONTINUATIONS = 3;
 
 export function createCultureClient(): Anthropic {
