@@ -4,11 +4,13 @@ import { db } from "../firebase";
 import { TIMEZONE, zoneParts } from "../notifications/timezone";
 import { CULTURE_CATALOG } from "./catalog";
 import { CatalogSource, CultureSettings, CultureSourceDoc } from "./types";
-import { pickSourcesToScan, validateScanResult, ValidEvent } from "./scanResult";
+import { pickSourcesToScan, titleKey, validateScanResult, ValidEvent } from "./scanResult";
 import { geminiApiKey, createCultureClient, lookupReview, scanSource } from "./geminiScanner";
+import { scanCinemaCity } from "./cinemaCity";
 
-const MAX_SOURCES_PER_RUN = 20;
-const MAX_REVIEW_LOOKUPS_PER_RUN = 25;
+const MAX_SOURCES_PER_RUN = 30;
+const MAX_REVIEW_LOOKUPS_PER_RUN = 25; // Gemini calls; cache hits don't count
+const MAX_PENDING_PER_RUN = 400;
 const CONCURRENCY = 3;
 const HORIZON_DAYS = 14;
 const WORK_BUDGET_MS = 25 * 60 * 1000;
@@ -107,15 +109,21 @@ export const cultureDailyScan = functions.scheduler.onSchedule(
       selected, MAX_SOURCES_PER_RUN,
     );
     const client = createCultureClient();
+    const catalogById = new Map(CULTURE_CATALOG.map((s) => [s.id, s]));
     console.log(`cultureDailyScan: ${toScan.length} sources (${selected.size} selected)`);
 
     await mapLimit(toScan, CONCURRENCY, async (id) => {
       if (outOfTime()) return;
       const doc = sources.get(id)!;
-      const source: CatalogSource = { id, name: doc.name, url: doc.url, type: doc.type, regions: doc.regions };
+      // The code catalog is the source of truth (it carries adapter config Firestore doesn't).
+      const source: CatalogSource = catalogById.get(id) ?? { id, name: doc.name, url: doc.url, type: doc.type, regions: doc.regions };
       const ref = db.doc(`cultureSources/${id}`);
       try {
-        const raw = await scanSource(client, source, todayStr, endStr);
+        const raw = source.adapter?.kind === "cinema-city"
+          ? await scanCinemaCity({
+            theatreId: source.adapter.theatreId, branchName: source.name, city: source.adapter.city, region: source.regions[0],
+          })
+          : await scanSource(client, source, todayStr, endStr);
         const events = validateScanResult(raw, source, now, HORIZON_DAYS);
         await upsertEvents(source, events);
         await ref.set({ lastScan: { at: Timestamp.now(), ok: true, eventCount: events.length }, consecutiveFailures: 0 }, { merge: true });
@@ -130,20 +138,41 @@ export const cultureDailyScan = functions.scheduler.onSchedule(
       }
     });
 
-    const pending = await db.collection("cultureEvents").where("reviewPending", "==", true).limit(MAX_REVIEW_LOOKUPS_PER_RUN).get();
-    await mapLimit(pending.docs, CONCURRENCY, async (doc) => {
+    // Reviews are cached per title in `cultureReviews`, so a film showing at 8
+    // Cinema City branches (and Lev, Planet...) costs one Gemini lookup.
+    const pending = await db.collection("cultureEvents").where("reviewPending", "==", true).limit(MAX_PENDING_PER_RUN).get();
+    const byTitle = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
+    for (const doc of pending.docs) {
+      const key = titleKey(doc.data().title);
+      byTitle.set(key, [...(byTitle.get(key) ?? []), doc]);
+    }
+    let lookups = 0;
+    let fromCache = 0;
+    await mapLimit([...byTitle.entries()], CONCURRENCY, async ([key, docs]) => {
       if (outOfTime()) return;
-      const e = doc.data();
+      const cacheRef = db.doc(`cultureReviews/${key}`);
       try {
-        const review = await lookupReview(client, { title: e.title, category: e.category, venue: e.venue });
-        await doc.ref.set({ review, recommended: review?.score === "positive", reviewPending: false }, { merge: true });
+        const cached = await cacheRef.get();
+        let review = cached.exists ? (cached.data()!.review ?? null) : undefined;
+        if (review === undefined) {
+          if (lookups >= MAX_REVIEW_LOOKUPS_PER_RUN) return; // next night
+          lookups++;
+          const e = docs[0].data();
+          review = await lookupReview(client, { title: e.title, category: e.category, venue: e.venue });
+          await cacheRef.set({ title: e.title, review, checkedAt: Timestamp.now() });
+        } else {
+          fromCache += docs.length;
+        }
+        const batch = db.batch();
+        for (const d of docs) batch.set(d.ref, { review, recommended: review?.score === "positive", reviewPending: false }, { merge: true });
+        await batch.commit();
       } catch (err) {
         // Leave reviewPending=true so it retries next night.
-        console.error(`cultureDailyScan: review for ${doc.id} failed`, err);
+        console.error(`cultureDailyScan: review for "${docs[0].data().title}" failed`, err);
       }
     });
 
     const deleted = await deletePastEvents(now);
-    console.log(`cultureDailyScan: reviewed ${pending.size}, deleted ${deleted} past events, ${Math.round((Date.now() - startedAt) / 1000)}s`);
+    console.log(`cultureDailyScan: ${lookups} review lookups, ${fromCache} from cache, deleted ${deleted} past events, ${Math.round((Date.now() - startedAt) / 1000)}s`);
   },
 );

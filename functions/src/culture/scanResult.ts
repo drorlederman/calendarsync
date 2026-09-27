@@ -110,3 +110,8 @@ export function pickSourcesToScan(
     .slice(0, max)
     .map((s) => s.id);
 }
+
+/** Source-independent key for a title — shares one review across branches/sites showing the same film or play. */
+export function titleKey(title: string): string {
+  return createHash("sha1").update(normalizeTitle(title)).digest("hex").slice(0, 24);
+}

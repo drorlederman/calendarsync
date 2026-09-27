@@ -37,6 +37,8 @@ export interface CatalogSource {
   url: string;
   type: CultureType;
   regions: CultureRegion[];
+  /** Read with a dedicated site adapter instead of the AI scanner. */
+  adapter?: { kind: "cinema-city"; theatreId: number; city: string };
 }
 
 export interface CultureSourceDoc {

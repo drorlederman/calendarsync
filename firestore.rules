@@ -92,6 +92,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // ─── /cultureReviews/{titleKey} ─────────────────────────────────────────
+    // Review cache shared across sources — Cloud Functions only.
+    match /cultureReviews/{key} {
+      allow read, write: if false;
+    }
     // ─── /cultureSentLog/{uid} ──────────────────────────────────────────────
     // Culture WhatsApp dedup log — Cloud Functions only.
     match /cultureSentLog/{uid} {

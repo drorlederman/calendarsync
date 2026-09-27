@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeTitle, eventId, parseLocalDate, validateScanResult, pickSourcesToScan } from "./scanResult";
+import { normalizeTitle, eventId, parseLocalDate, validateScanResult, pickSourcesToScan, titleKey } from "./scanResult";
 
 const TZ = "Asia/Jerusalem";
 const NOW = new Date("2026-09-26T09:00:00+03:00");
@@ -84,4 +84,9 @@ test("pickSourcesToScan filters to selected+enabled and scans the stalest first"
     { id: "e", enabled: true, lastScanAtMs: 50 },
   ], new Set(["a", "b", "c", "d"]), 2);
   assert.deepEqual(ids, ["b", "d"]);
+});
+
+test("titleKey ignores source and formatting", () => {
+  assert.equal(titleKey("Hamlet"), titleKey(" hamlet! "));
+  assert.notEqual(titleKey("Hamlet"), titleKey("Macbeth"));
 });
