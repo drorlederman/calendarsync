@@ -45,6 +45,7 @@ export default function CultureSection() {
   const [frequency, setFrequency] = useState<CultureFrequency>(d.frequency);
   const [days, setDays] = useState<number[]>(d.days);
   const [time, setTime] = useState(d.time);
+  const [extraPhone, setExtraPhone] = useState(d.extraPhone);
   const [sources, setSources] = useState<ClientCultureSource[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -76,6 +77,7 @@ export default function CultureSection() {
             if (c.frequency) setFrequency(c.frequency);
             if (c.days) setDays(c.days);
             if (c.time) setTime(c.time);
+            if (typeof c.extraPhone === "string") setExtraPhone(c.extraPhone);
           }
           loadedOnce.current = true;
         }
@@ -89,6 +91,11 @@ export default function CultureSection() {
 
   const save = async () => {
     if (!user) return;
+    const phone = extraPhone.trim();
+    if (phone && phone.replace(/\D/g, "").length < 9) {
+      setSaveMsg("מספר הטלפון הנוסף לא תקין");
+      return;
+    }
     setSaving(true);
     setSaveMsg(null);
     try {
@@ -98,7 +105,7 @@ export default function CultureSection() {
       ]);
       const visibleIds = new Set(visible.map((s) => s.id));
       const culture = {
-        enabled, regions, types, taste: taste.trim(), frequency, time,
+        enabled, regions, types, taste: taste.trim(), frequency, time, extraPhone: phone,
         sourceIds: sourceIds.filter((id) => visibleIds.has(id)),
         days: normalizeDays(frequency, days),
       };
@@ -221,6 +228,22 @@ export default function CultureSection() {
               className={`w-full ${selectStyle}`}
               style={{ color: "#0D1321" }}
             />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1.5" style={{ color: "#5B6477" }}>מספר WhatsApp נוסף (לא חובה)</label>
+            <input
+              type="tel"
+              dir="ltr"
+              value={extraPhone}
+              onChange={(e) => setExtraPhone(e.target.value)}
+              placeholder="050-1234567"
+              className={`w-full max-w-xs text-right ${selectStyle}`}
+              style={{ color: "#0D1321" }}
+            />
+            <p className="text-xs mt-1" style={{ color: "#5B6477" }}>
+              יקבל רק את הודעות התרבות, בנוסף למספר הראשי. כל מספר נוסף נספר במכסת אנשי הקשר החודשית של Green API.
+            </p>
           </div>
 
           <div className="flex flex-wrap items-end gap-3">

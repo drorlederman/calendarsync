@@ -15,6 +15,7 @@ export interface CultureSettings {
   frequency: CultureFrequency;
   days: number[]; // 0 = Sunday. daily: ignored; weekly: 1 day; twiceWeekly: 2 days
   time: string;   // "HH:MM", Asia/Jerusalem
+  extraPhone: string; // optional second WhatsApp recipient for culture messages only ("" = none)
 }
 
 export const DEFAULT_CULTURE_SETTINGS: CultureSettings = {
@@ -26,6 +27,7 @@ export const DEFAULT_CULTURE_SETTINGS: CultureSettings = {
   frequency: "weekly",
   days: [0],
   time: "09:00",
+  extraPhone: "",
 };
 
 /** One entry of the managed catalog, as written in code. */

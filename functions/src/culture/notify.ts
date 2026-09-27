@@ -8,6 +8,7 @@ import { cultureDueKey, nextSendAfter } from "./schedule";
 import { selectForMessage, SelectableEvent } from "./select";
 import { buildCultureMessage } from "./message";
 import { CultureEventDoc } from "./types";
+import { cultureRecipients, phoneKey } from "./recipients";
 
 export async function loadCultureEvents(sourceIds: string[]): Promise<SelectableEvent[]> {
   const out: SelectableEvent[] = [];
@@ -40,15 +41,24 @@ export async function processCulture(
   const to = nextSendAfter(culture, now, TIMEZONE);
   const picks = selectForMessage(await loadCultureEvents(culture.sourceIds), culture, now, to);
   if (picks.length > 0) {
-    try {
-      await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, buildCultureMessage(picks, now, to, TIMEZONE, APP_URL));
-    } catch (err) {
-      if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
-      console.warn(`WhatsApp quota exceeded (uid=${uid}) — culture "${key}" not delivered, will retry later`, err.detail);
-      return true;
+    const message = buildCultureMessage(picks, now, to, TIMEZONE, APP_URL);
+    // Per-recipient keys so a quota failure on the extra phone never re-sends to
+    // the main phone on retry (and vice versa).
+    for (const phone of cultureRecipients(settings.whatsapp.phone, culture.extraPhone)) {
+      const recipientKey = `${key}_${phoneKey(phone)}`;
+      if (sent[recipientKey]) continue;
+      try {
+        await sendWhatsApp(apiUrl, instanceId, token, phone, message);
+      } catch (err) {
+        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
+        console.warn(`WhatsApp quota exceeded (uid=${uid}) — culture "${recipientKey}" not delivered, will retry later`, err.detail);
+        return true;
+      }
+      await logRef.set({ sent: { [recipientKey]: true } }, { merge: true });
     }
   }
-  // Mark even when empty: an empty period sends nothing and must not retry every tick.
+  // Slot done for everyone. Marked even when empty: an empty period sends
+  // nothing and must not retry every tick.
   await logRef.set({ sent: { [key]: true } }, { merge: true });
   return false;
 }
@@ -71,7 +81,9 @@ export const sendTestCultureCallable = functions.https.onCall(
       ? buildCultureMessage(picks, now, to, TIMEZONE, APP_URL)
       : `🎭 הודעת בדיקה — עדיין לא נמצאו אירועים באתרים ובאזורים שבחרת לתקופה הקרובה.\nהסריקה רצה כל לילה ב-03:00.\n\n${APP_URL}/culture`;
     try {
-      await sendWhatsApp(greenApiUrl.value(), greenApiInstance.value(), greenApiToken.value(), whatsapp.phone, message);
+      for (const phone of cultureRecipients(whatsapp.phone, culture.extraPhone)) {
+        await sendWhatsApp(greenApiUrl.value(), greenApiInstance.value(), greenApiToken.value(), phone, message);
+      }
     } catch (err) {
       if (err instanceof WhatsAppQuotaExceededError) {
         throw new functions.https.HttpsError(

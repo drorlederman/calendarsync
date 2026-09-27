@@ -17,11 +17,12 @@ export interface CultureSettings {
   frequency: CultureFrequency;
   days: number[];
   time: string;
+  extraPhone: string;
 }
 
 export const DEFAULT_CULTURE_SETTINGS: CultureSettings = {
   enabled: false, regions: [], types: [], sourceIds: [], taste: "",
-  frequency: "weekly", days: [0], time: "09:00",
+  frequency: "weekly", days: [0], time: "09:00", extraPhone: "",
 };
 
 export const REGION_LABELS: Record<CultureRegion, string> = {
