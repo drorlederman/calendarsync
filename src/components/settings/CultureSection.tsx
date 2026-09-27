@@ -175,7 +175,23 @@ export default function CultureSection() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "#5B6477" }}>אתרים לסריקה</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-sm font-medium" style={{ color: "#5B6477" }}>אתרים לסריקה</label>
+              {visible.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const ids = visible.map((s) => s.id);
+                    const allSelected = ids.every((id) => sourceIds.includes(id));
+                    setSourceIds((p) => (allSelected ? p.filter((id) => !ids.includes(id)) : [...new Set([...p, ...ids])]));
+                  }}
+                  className="text-sm font-medium hover:opacity-70"
+                  style={{ color: "#2563EB" }}
+                >
+                  {visible.every((s) => sourceIds.includes(s.id)) ? "נקה הכל" : "בחר הכל"}
+                </button>
+              )}
+            </div>
             {visible.length === 0 ? (
               <p className="text-sm" style={{ color: "#5B6477" }}>
                 {sources.length === 0 ? "רשימת האתרים תופיע אחרי הסריקה הראשונה." : "אין אתרים שמתאימים לסינון."}
