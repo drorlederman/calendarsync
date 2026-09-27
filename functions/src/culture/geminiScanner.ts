@@ -1,60 +1,47 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
 import { defineSecret } from "firebase-functions/params";
 import { CatalogSource, CultureReview, CultureType } from "./types";
 
-export const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
+export const geminiApiKey = defineSecret("GEMINI_API_KEY");
 
-// Single place to change the model (e.g. "claude-sonnet-5" to cut cost).
-export const CULTURE_MODEL = "claude-sonnet-5";
-const MAX_CONTINUATIONS = 3;
+// Single place to change the model (e.g. "gemini-3.5-flash-lite" to cut cost).
+// Structured output combined with built-in tools requires a Gemini 3 model.
+export const CULTURE_MODEL = "gemini-3.8-flash";
 
-export function createCultureClient(): Anthropic {
-  return new Anthropic({ apiKey: anthropicApiKey.value(), timeout: 5 * 60 * 1000 });
+export type CultureAiClient = GoogleGenAI;
+
+export function createCultureClient(): CultureAiClient {
+  return new GoogleGenAI({ apiKey: geminiApiKey.value() });
 }
 
 /**
- * One structured-output request with server tools. Server tools can end a turn
- * with `pause_turn`; resume by re-sending the assistant content (no extra user
- * message). Returns the parsed JSON from the final text block.
+ * One structured-output interaction with Gemini's built-in URL context and
+ * Google Search tools. Returns the parsed JSON (validated later by the caller).
  */
 async function runJsonTask(
-  client: Anthropic,
-  opts: { system: string; prompt: string; tools: Anthropic.Beta.BetaToolUnion[]; schema: Record<string, unknown> },
+  client: CultureAiClient,
+  opts: { system: string; prompt: string; schema: Record<string, unknown> },
 ): Promise<unknown> {
-  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: opts.prompt }];
-  for (let i = 0; i <= MAX_CONTINUATIONS; i++) {
-    const res = await client.beta.messages.create({
-      model: CULTURE_MODEL,
-      max_tokens: 16000,
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
-      system: opts.system,
-      tools: opts.tools,
-      output_config: { effort: "medium", format: { type: "json_schema", schema: opts.schema } },
-      messages,
-    });
-    if (res.stop_reason === "pause_turn") {
-      messages.push({ role: "assistant", content: res.content });
-      continue;
-    }
-    if (res.stop_reason === "refusal") throw new Error(`Claude refused: ${JSON.stringify(res.stop_details)}`);
-    if (res.stop_reason === "max_tokens") throw new Error("Claude output truncated (max_tokens)");
-    const text = res.content.map((b) => (b.type === "text" ? b.text : "")).join("");
-    return JSON.parse(text);
-  }
-  throw new Error(`Claude still paused after ${MAX_CONTINUATIONS} continuations`);
+  const interaction = await client.interactions.create({
+    model: CULTURE_MODEL,
+    system_instruction: opts.system,
+    input: opts.prompt,
+    tools: [{ type: "url_context" }, { type: "google_search" }],
+    response_format: { type: "text", mime_type: "application/json", schema: opts.schema },
+  });
+  const text = interaction.output_text;
+  if (!text) throw new Error(`Gemini returned no text (status=${interaction.status})`);
+  return JSON.parse(text);
 }
 
 const SCAN_SCHEMA = {
   type: "object",
-  additionalProperties: false,
   required: ["events"],
   properties: {
     events: {
       type: "array",
       items: {
         type: "object",
-        additionalProperties: false,
         required: ["title", "venue", "city", "region", "dates", "url", "description"],
         properties: {
           title: { type: "string" },
@@ -75,7 +62,9 @@ const SCAN_SYSTEM =
   "Report only what the site itself lists; never invent events, dates or links. " +
   "Keep titles exactly as shown on the site (usually Hebrew).";
 
-export async function scanSource(client: Anthropic, source: CatalogSource, todayStr: string, endStr: string): Promise<unknown> {
+export async function scanSource(
+  client: CultureAiClient, source: CatalogSource, todayStr: string, endStr: string,
+): Promise<unknown> {
   const host = new URL(source.url).hostname.replace(/^www\./, "");
   const prompt = [
     `Site: ${source.name}`,
@@ -83,7 +72,8 @@ export async function scanSource(client: Anthropic, source: CatalogSource, today
     `Today (Asia/Jerusalem): ${todayStr}`,
     `Allowed regions for "region": ${source.regions.join(", ")}`,
     "",
-    `Fetch the start page, and at most 3 further pages on the same site if needed to reach the events / shows / movies listing.`,
+    `Read the start page, and at most 3 further pages on ${host} if needed to reach the events / shows / movies listing.`,
+    `Use only pages on ${host} as the source of events (search only to locate listing pages on that site).`,
     `Return every event with a performance or screening between ${todayStr} and ${endStr} inclusive.`,
     `- dates: live shows as "YYYY-MM-DDTHH:mm" (local time); cinemas as "YYYY-MM-DD" per screening day, no times. At most 30 dates per event.`,
     `- region: one of the allowed regions, based on the branch / city of the performance.`,
@@ -92,20 +82,11 @@ export async function scanSource(client: Anthropic, source: CatalogSource, today
     `If the listing cannot be read, return {"events": []}.`,
   ].join("\n");
 
-  return runJsonTask(client, {
-    system: SCAN_SYSTEM,
-    prompt,
-    schema: SCAN_SCHEMA,
-    tools: [
-      { type: "web_fetch_20260209", name: "web_fetch", max_uses: 4, allowed_domains: [host], max_content_tokens: 40000 },
-      { type: "web_search_20260209", name: "web_search", max_uses: 2, allowed_domains: [host] },
-    ],
-  });
+  return runJsonTask(client, { system: SCAN_SYSTEM, prompt, schema: SCAN_SCHEMA });
 }
 
 const REVIEW_SCHEMA = {
   type: "object",
-  additionalProperties: false,
   required: ["found", "score", "summary", "outlet"],
   properties: {
     found: { type: "boolean" },
@@ -116,7 +97,7 @@ const REVIEW_SCHEMA = {
 };
 
 export async function lookupReview(
-  client: Anthropic, ev: { title: string; category: CultureType; venue: string },
+  client: CultureAiClient, ev: { title: string; category: CultureType; venue: string },
 ): Promise<CultureReview | null> {
   const kind = ev.category === "cinema" ? "film" : "theater production";
   const prompt = [
@@ -131,10 +112,6 @@ export async function lookupReview(
     system: "You research critics' reviews of films and plays. Report only what published reviews actually say.",
     prompt,
     schema: REVIEW_SCHEMA,
-    tools: [
-      { type: "web_search_20260209", name: "web_search", max_uses: 4 },
-      { type: "web_fetch_20260209", name: "web_fetch", max_uses: 2 },
-    ],
   })) as { found: boolean; score: CultureReview["score"]; summary: string; outlet: string };
 
   if (!out.found || !out.summary) return null;

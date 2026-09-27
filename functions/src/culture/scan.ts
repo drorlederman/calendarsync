@@ -5,7 +5,7 @@ import { TIMEZONE, zoneParts } from "../notifications/timezone";
 import { CULTURE_CATALOG } from "./catalog";
 import { CatalogSource, CultureSettings, CultureSourceDoc } from "./types";
 import { pickSourcesToScan, validateScanResult, ValidEvent } from "./scanResult";
-import { anthropicApiKey, createCultureClient, lookupReview, scanSource } from "./claudeScanner";
+import { geminiApiKey, createCultureClient, lookupReview, scanSource } from "./geminiScanner";
 
 const MAX_SOURCES_PER_RUN = 20;
 const MAX_REVIEW_LOOKUPS_PER_RUN = 25;
@@ -91,7 +91,7 @@ async function deletePastEvents(now: Date): Promise<number> {
 export const cultureDailyScan = functions.scheduler.onSchedule(
   {
     schedule: "0 3 * * *", timeZone: TIMEZONE, timeoutSeconds: 1800, memory: "512MiB",
-    secrets: [anthropicApiKey],
+    secrets: [geminiApiKey],
   },
   async () => {
     const startedAt = Date.now();
