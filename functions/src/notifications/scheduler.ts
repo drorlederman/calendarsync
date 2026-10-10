@@ -2,7 +2,7 @@ import * as functions from "firebase-functions/v2";
 import * as admin from "firebase-admin";
 import { db } from "../firebase";
 import { EventDoc, ReminderDoc, SettingsDoc, DEFAULT_SETTINGS, resolveReminderLevel } from "../types";
-import { sendWhatsApp, WhatsAppQuotaExceededError, greenApiUrl, greenApiInstance, greenApiToken } from "./whatsapp";
+import { sendWhatsApp, WhatsAppUnavailableError, whatsappSecrets } from "./whatsapp";
 import { TIMEZONE, zoneParts, localDayBoundsUtc, fmtTime, fmtDateTime } from "./timezone";
 import { pruneNagKeys, shouldFireNag } from "./nag";
 import { ensureCompletionCode } from "./ensureCompletionCode";
@@ -101,11 +101,11 @@ async function countTodaySlackAlerts(uid: string, start: Date, end: Date): Promi
   return snap.docs.filter((d) => d.data().isDM || d.data().isMention).length;
 }
 
-// Returns true when Green API's correspondents quota was hit mid-batch — the
+// Returns true when WhatsApp turned out to be unavailable mid-batch — the
 // caller uses that to skip the rest of this tick's sends for this user
-// rather than throwing more of the same failure at Green API.
+// rather than throwing more of the same failure at UltraMsg.
 async function processReminders(
-  uid: string, settings: SettingsDoc, now: Date, apiUrl: string, instanceId: string, token: string
+  uid: string, settings: SettingsDoc, now: Date
 ): Promise<boolean> {
   const offsets = settings.reminders.offsetsMinutes;
   if (offsets.length === 0) return false;
@@ -123,7 +123,7 @@ async function processReminders(
   const sentLogSnap = await sentLogRef.get();
   const sentReminders: Record<string, boolean> = (sentLogSnap.data()?.reminders as Record<string, boolean>) ?? {};
   const newlySent: Record<string, boolean> = {};
-  let quotaExceeded = false;
+  let unavailable = false;
 
   outer:
   for (const doc of eventsSnap.docs) {
@@ -142,23 +142,23 @@ async function processReminders(
       if (sentReminders[key] || newlySent[key]) continue;
 
       try {
-        await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, buildReminderMessage(event, offsetMinutes));
+        await sendWhatsApp(settings.whatsapp.phone, buildReminderMessage(event, offsetMinutes));
       } catch (err) {
-        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
-        console.warn(`WhatsApp quota exceeded (uid=${uid}) — reminder "${key}" not delivered, will retry later`, err.detail);
-        quotaExceeded = true;
+        if (!(err instanceof WhatsAppUnavailableError)) throw err;
+        console.warn(`WhatsApp unavailable (uid=${uid}) — reminder "${key}" not delivered, will retry later`, err.detail);
+        unavailable = true;
         break outer;
       }
       newlySent[key] = true;
     }
   }
 
-  // Persist whatever did go out before hitting quota — only the failed one
+  // Persist whatever did go out before WhatsApp became unavailable — only the failed one
   // (and anything not yet attempted) is left unmarked, so it retries later.
   if (Object.keys(newlySent).length > 0) {
     await sentLogRef.set({ reminders: newlySent }, { merge: true });
   }
-  return quotaExceeded;
+  return unavailable;
 }
 
 type TaskFire = { key: string; at: number; kind: "remindAt" | "lead"; offsetMinutes?: number };
@@ -183,7 +183,7 @@ function taskFireTimes(id: string, r: ReminderDoc): TaskFire[] {
 }
 
 async function processTaskReminders(
-  uid: string, settings: SettingsDoc, now: Date, apiUrl: string, instanceId: string, token: string
+  uid: string, settings: SettingsDoc, now: Date
 ): Promise<boolean> {
   const snap = await db.collection("reminders")
     .where("uid", "==", uid)
@@ -200,7 +200,7 @@ async function processTaskReminders(
   // Track the last reminder we actually messaged about this tick, so a bare
   // "בוצע" reply (no code) can complete the reminder the user was just nudged on.
   let lastNotifiedReminderId: string | null = null;
-  let quotaExceeded = false;
+  let unavailable = false;
 
   outer:
   for (const doc of snap.docs) {
@@ -219,13 +219,13 @@ async function processTaskReminders(
       const completionCode = await ensureCode();
       try {
         await sendWhatsApp(
-          apiUrl, instanceId, token, settings.whatsapp.phone,
+          settings.whatsapp.phone,
           buildTaskMessage(reminder, fire.kind, { offsetMinutes: fire.offsetMinutes, completionCode })
         );
       } catch (err) {
-        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
-        console.warn(`WhatsApp quota exceeded (uid=${uid}) — task "${fire.key}" not delivered, will retry later`, err.detail);
-        quotaExceeded = true;
+        if (!(err instanceof WhatsAppUnavailableError)) throw err;
+        console.warn(`WhatsApp unavailable (uid=${uid}) — task "${fire.key}" not delivered, will retry later`, err.detail);
+        unavailable = true;
         break outer;
       }
       newlySent[fire.key] = true;
@@ -248,13 +248,13 @@ async function processTaskReminders(
       const completionCode = await ensureCode();
       try {
         await sendWhatsApp(
-          apiUrl, instanceId, token, settings.whatsapp.phone,
+          settings.whatsapp.phone,
           buildTaskMessage(reminder, "nag", { completionCode })
         );
       } catch (err) {
-        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
-        console.warn(`WhatsApp quota exceeded (uid=${uid}) — nag "${nag.key}" not delivered, will retry later`, err.detail);
-        quotaExceeded = true;
+        if (!(err instanceof WhatsAppUnavailableError)) throw err;
+        console.warn(`WhatsApp unavailable (uid=${uid}) — nag "${nag.key}" not delivered, will retry later`, err.detail);
+        unavailable = true;
         break outer;
       }
       newlySent[nag.key] = true;
@@ -273,7 +273,7 @@ async function processTaskReminders(
     const merged = pruneNagKeys({ ...sentTasks, ...newlySent }, todayStr);
     await sentLogRef.set({ tasks: merged }, { merge: true });
   }
-  return quotaExceeded;
+  return unavailable;
 }
 
 // "weekdays" follows the Israeli work week (Sunday–Thursday), not the
@@ -283,7 +283,7 @@ function isIsraeliWorkday(dayOfWeek: number): boolean {
 }
 
 async function processDigest(
-  uid: string, settings: SettingsDoc, now: Date, apiUrl: string, instanceId: string, token: string
+  uid: string, settings: SettingsDoc, now: Date
 ): Promise<boolean> {
   if (!settings.digest.enabled || settings.digest.times.length === 0) return false;
   const parts = zoneParts(now, TIMEZONE);
@@ -315,14 +315,14 @@ async function processDigest(
   const message = buildDigestMessage(events, dateLabel, slackCount);
 
   const newlySent: Record<string, boolean> = {};
-  let quotaExceeded = false;
+  let unavailable = false;
   for (const time of pending) {
     try {
-      await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, message);
+      await sendWhatsApp(settings.whatsapp.phone, message);
     } catch (err) {
-      if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
-      console.warn(`WhatsApp quota exceeded (uid=${uid}) — digest for ${time} not delivered, will retry later`, err.detail);
-      quotaExceeded = true;
+      if (!(err instanceof WhatsAppUnavailableError)) throw err;
+      console.warn(`WhatsApp unavailable (uid=${uid}) — digest for ${time} not delivered, will retry later`, err.detail);
+      unavailable = true;
       break;
     }
     newlySent[`${parts.dateStr}_${time}`] = true;
@@ -330,15 +330,12 @@ async function processDigest(
   if (Object.keys(newlySent).length > 0) {
     await sentLogRef.set({ digest: newlySent }, { merge: true });
   }
-  return quotaExceeded;
+  return unavailable;
 }
 
 export const whatsappSchedulerTick = functions.scheduler.onSchedule(
-  { schedule: "*/5 * * * *", secrets: [greenApiUrl, greenApiInstance, greenApiToken] },
+  { schedule: "*/5 * * * *", secrets: whatsappSecrets },
   async () => {
-    const apiUrl = greenApiUrl.value();
-    const instanceId = greenApiInstance.value();
-    const token = greenApiToken.value();
     const now = new Date();
 
     const settingsSnap = await db.collection("settings").get();
@@ -357,15 +354,15 @@ export const whatsappSchedulerTick = functions.scheduler.onSchedule(
       };
       if (!settings.whatsapp.enabled || !settings.whatsapp.phone) continue;
       try {
-        // Each processor returns true once it hits Green API's correspondents
-        // quota — skip the rest of this user's sends for the tick rather than
+        // Each processor returns true once WhatsApp turns out to be
+        // unavailable — skip the rest of this user's sends for the tick rather than
         // repeating the same failure (and log spam) against every remaining
         // reminder/digest. Nothing already sent is lost; the rest retries
-        // on the next tick once quota resets.
-        const remindersQuota = await processReminders(uid, settings, now, apiUrl, instanceId, token);
-        const tasksQuota = remindersQuota || await processTaskReminders(uid, settings, now, apiUrl, instanceId, token);
-        const digestQuota = tasksQuota || await processDigest(uid, settings, now, apiUrl, instanceId, token);
-        if (!digestQuota) await processCulture(uid, settings, now, apiUrl, instanceId, token);
+        // on the next tick once the instance is linked again.
+        const remindersBlocked = await processReminders(uid, settings, now);
+        const tasksBlocked = remindersBlocked || await processTaskReminders(uid, settings, now);
+        const digestBlocked = tasksBlocked || await processDigest(uid, settings, now);
+        if (!digestBlocked) await processCulture(uid, settings, now);
       } catch (err) {
         console.error(`WhatsApp scheduler error for user ${uid}:`, err);
       }
@@ -374,7 +371,7 @@ export const whatsappSchedulerTick = functions.scheduler.onSchedule(
 );
 
 export const sendTestWhatsAppCallable = functions.https.onCall(
-  { secrets: [greenApiUrl, greenApiInstance, greenApiToken] },
+  { secrets: whatsappSecrets },
   async (request) => {
     const uid = request.auth?.uid;
     if (!uid) throw new functions.https.HttpsError("unauthenticated", "Sign in required");
@@ -389,10 +386,6 @@ export const sendTestWhatsAppCallable = functions.https.onCall(
       throw new functions.https.HttpsError("failed-precondition", "לא הוגדר מספר WhatsApp בהגדרות");
     }
 
-    const apiUrl = greenApiUrl.value();
-    const instanceId = greenApiInstance.value();
-    const token = greenApiToken.value();
-
     try {
       if (kind === "reminder") {
         const now = admin.firestore.Timestamp.now();
@@ -406,7 +399,7 @@ export const sendTestWhatsAppCallable = functions.https.onCall(
         const message = upcoming
           ? buildReminderMessage(upcoming, settings.reminders.offsetsMinutes[0] ?? 15)
           : "⏰ תזכורת לדוגמה — אין פגישה קרובה ביומן כרגע, אך כך תיראה הודעת תזכורת.\n\n📌 פגישת דוגמה\n🕐 14:00\n🔗 https://meet.google.com/abc-defg-hij";
-        await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, message);
+        await sendWhatsApp(settings.whatsapp.phone, message);
       } else {
         const { start, end } = localDayBoundsUtc(new Date(), TIMEZONE);
         const eventsSnap = await db.collection("events")
@@ -417,13 +410,13 @@ export const sendTestWhatsAppCallable = functions.https.onCall(
         const events = eventsSnap.docs.map((d) => d.data() as EventDoc).filter((e) => e.status === "confirmed");
         const slackCount = await countTodaySlackAlerts(uid, start, end);
         const dateLabel = new Intl.DateTimeFormat("he-IL", { timeZone: TIMEZONE, day: "numeric", month: "long" }).format(new Date());
-        await sendWhatsApp(apiUrl, instanceId, token, settings.whatsapp.phone, buildDigestMessage(events, dateLabel, slackCount));
+        await sendWhatsApp(settings.whatsapp.phone, buildDigestMessage(events, dateLabel, slackCount));
       }
     } catch (err) {
-      if (err instanceof WhatsAppQuotaExceededError) {
+      if (err instanceof WhatsAppUnavailableError) {
         throw new functions.https.HttpsError(
-          "resource-exhausted",
-          "מכסת ה-WhatsApp (Green API, תוכנית Developer) נגמרה החודש — שדרגו תוכנית או המתינו לאיפוס בתחילת החודש"
+          "failed-precondition",
+          "חיבור ה-WhatsApp (UltraMsg) מנותק — יש לסרוק מחדש את קוד ה-QR בלוח הבקרה של UltraMsg"
         );
       }
       throw err;
@@ -437,7 +430,7 @@ export const sendTestWhatsAppCallable = functions.https.onCall(
 // a reminder card, and lets the user verify delivery without waiting for the
 // 5-minute tick.
 export const sendReminderNowCallable = functions.https.onCall(
-  { secrets: [greenApiUrl, greenApiInstance, greenApiToken] },
+  { secrets: whatsappSecrets },
   async (request) => {
     const uid = request.auth?.uid;
     if (!uid) throw new functions.https.HttpsError("unauthenticated", "Sign in required");
@@ -459,14 +452,13 @@ export const sendReminderNowCallable = functions.https.onCall(
     const completionCode = await ensureCompletionCode(reminderId, reminder);
     try {
       await sendWhatsApp(
-        greenApiUrl.value(), greenApiInstance.value(), greenApiToken.value(),
         settings.whatsapp.phone, buildTaskMessage(reminder, "remindAt", { completionCode })
       );
     } catch (err) {
-      if (err instanceof WhatsAppQuotaExceededError) {
+      if (err instanceof WhatsAppUnavailableError) {
         throw new functions.https.HttpsError(
-          "resource-exhausted",
-          "מכסת ה-WhatsApp (Green API, תוכנית Developer) נגמרה החודש — שדרגו תוכנית או המתינו לאיפוס בתחילת החודש"
+          "failed-precondition",
+          "חיבור ה-WhatsApp (UltraMsg) מנותק — יש לסרוק מחדש את קוד ה-QR בלוח הבקרה של UltraMsg"
         );
       }
       throw err;

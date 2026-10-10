@@ -90,7 +90,7 @@ export default function WhatsAppSection() {
     <div className="bg-white rounded-2xl p-6 space-y-4" style={{ border: "1px solid #E8EDF5" }}>
       <div>
         <h2 className="text-base font-semibold" style={{ color: "#0D1321" }}>💬 עדכוני WhatsApp</h2>
-        <p className="text-sm mt-1" style={{ color: "#5B6477" }}>מספר ה-WhatsApp שאליו יישלחו תזכורות וסיכומי פגישות (דרך Green API)</p>
+        <p className="text-sm mt-1" style={{ color: "#5B6477" }}>מספר ה-WhatsApp שאליו יישלחו תזכורות וסיכומי פגישות (דרך UltraMsg)</p>
       </div>
 
       {loading ? (

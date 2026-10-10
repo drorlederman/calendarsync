@@ -3,7 +3,7 @@ import { db } from "../firebase";
 import { APP_URL } from "../config";
 import { DEFAULT_SETTINGS, SettingsDoc } from "../types";
 import { TIMEZONE } from "../notifications/timezone";
-import { sendWhatsApp, WhatsAppQuotaExceededError, greenApiUrl, greenApiInstance, greenApiToken } from "../notifications/whatsapp";
+import { sendWhatsApp, WhatsAppUnavailableError, whatsappSecrets } from "../notifications/whatsapp";
 import { cultureDueKey, nextSendAfter } from "./schedule";
 import { selectForMessage, SelectableEvent } from "./select";
 import { buildCultureMessage } from "./message";
@@ -28,7 +28,7 @@ export async function loadCultureEvents(sourceIds: string[]): Promise<Selectable
 }
 
 export async function processCulture(
-  uid: string, settings: SettingsDoc, now: Date, apiUrl: string, instanceId: string, token: string,
+  uid: string, settings: SettingsDoc, now: Date,
 ): Promise<boolean> {
   const culture = settings.culture;
   const key = cultureDueKey(culture, now, TIMEZONE);
@@ -42,16 +42,16 @@ export async function processCulture(
   const picks = selectForMessage(await loadCultureEvents(culture.sourceIds), culture, now, to);
   if (picks.length > 0) {
     const message = buildCultureMessage(picks, now, to, TIMEZONE, APP_URL);
-    // Per-recipient keys so a quota failure on the extra phone never re-sends to
+    // Per-recipient keys so a failed send to the extra phone never re-sends to
     // the main phone on retry (and vice versa).
     for (const phone of cultureRecipients(settings.whatsapp.phone, culture.extraPhone)) {
       const recipientKey = `${key}_${phoneKey(phone)}`;
       if (sent[recipientKey]) continue;
       try {
-        await sendWhatsApp(apiUrl, instanceId, token, phone, message);
+        await sendWhatsApp(phone, message);
       } catch (err) {
-        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
-        console.warn(`WhatsApp quota exceeded (uid=${uid}) — culture "${recipientKey}" not delivered, will retry later`, err.detail);
+        if (!(err instanceof WhatsAppUnavailableError)) throw err;
+        console.warn(`WhatsApp unavailable (uid=${uid}) — culture "${recipientKey}" not delivered, will retry later`, err.detail);
         return true;
       }
       await logRef.set({ sent: { [recipientKey]: true } }, { merge: true });
@@ -64,7 +64,7 @@ export async function processCulture(
 }
 
 export const sendTestCultureCallable = functions.https.onCall(
-  { secrets: [greenApiUrl, greenApiInstance, greenApiToken] },
+  { secrets: whatsappSecrets },
   async (request) => {
     const uid = request.auth?.uid;
     if (!uid) throw new functions.https.HttpsError("unauthenticated", "Sign in required");
@@ -82,13 +82,13 @@ export const sendTestCultureCallable = functions.https.onCall(
       : `🎭 הודעת בדיקה — עדיין לא נמצאו אירועים באתרים ובאזורים שבחרת לתקופה הקרובה.\nהסריקה רצה כל לילה ב-03:00.\n\n${APP_URL}/culture`;
     try {
       for (const phone of cultureRecipients(whatsapp.phone, culture.extraPhone)) {
-        await sendWhatsApp(greenApiUrl.value(), greenApiInstance.value(), greenApiToken.value(), phone, message);
+        await sendWhatsApp(phone, message);
       }
     } catch (err) {
-      if (err instanceof WhatsAppQuotaExceededError) {
+      if (err instanceof WhatsAppUnavailableError) {
         throw new functions.https.HttpsError(
-          "resource-exhausted",
-          "מכסת ה-WhatsApp (Green API, תוכנית Developer) נגמרה החודש — שדרגו תוכנית או המתינו לאיפוס בתחילת החודש",
+          "failed-precondition",
+          "חיבור ה-WhatsApp (UltraMsg) מנותק — יש לסרוק מחדש את קוד ה-QR בלוח הבקרה של UltraMsg",
         );
       }
       throw err;

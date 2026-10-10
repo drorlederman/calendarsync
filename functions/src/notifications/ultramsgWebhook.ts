@@ -2,43 +2,40 @@ import * as functions from "firebase-functions/v2";
 import * as admin from "firebase-admin";
 import { db } from "../firebase";
 import { ReminderDoc, SettingsDoc } from "../types";
-import { sendWhatsApp, WhatsAppQuotaExceededError, greenApiUrl, greenApiInstance, greenApiToken } from "./whatsapp";
+import { defineSecret } from "firebase-functions/params";
+import { sendWhatsApp, WhatsAppUnavailableError, whatsappSecrets, ultramsgInstance } from "./whatsapp";
 import { parseCompletionReply, phonesMatch } from "./completionCode";
+
+// UltraMsg webhooks carry no auth header or signature, so the webhook URL
+// configured in the UltraMsg dashboard carries this secret as `?secret=`.
+const webhookSecret = defineSecret("ULTRAMSG_WEBHOOK_SECRET");
 
 const BARE_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-interface GreenIncomingWebhook {
-  typeWebhook?: string;
-  instanceData?: { idInstance?: number | string; wid?: string };
-  idMessage?: string;
-  senderData?: {
-    chatId?: string;
-    sender?: string;
+// event_type "message_received" = a message sent to the instance's number;
+// "message_create" = one created on it — including replies the user types on
+// their own phone in the self-notify setup (and our own API sends, which are
+// never a bare "בוצע [code]" so parseCompletionReply ignores them).
+interface UltraMsgWebhook {
+  event_type?: string;
+  instanceId?: string | number;
+  data?: {
+    id?: string;
+    from?: string;
+    to?: string;
+    type?: string;
+    body?: string;
+    fromMe?: boolean;
   };
-  messageData?: {
-    typeMessage?: string;
-    textMessageData?: { textMessage?: string };
-    extendedTextMessageData?: { text?: string };
-  };
-  // Present on typeWebhook "quotaExceeded" — tells us which Developer-plan
-  // limit was hit (e.g. the 3-correspondents/month cap) and current usage.
-  quotaData?: { method?: string; used?: number; total?: number; status?: string; description?: string };
 }
 
-function extractText(payload: GreenIncomingWebhook): string | null {
-  const md = payload.messageData;
-  if (!md) return null;
-  return md.textMessageData?.textMessage
-    ?? md.extendedTextMessageData?.text
-    ?? null;
+function extractText(payload: UltraMsgWebhook): string | null {
+  if (payload.data?.type && payload.data.type !== "chat") return null;
+  return payload.data?.body || null;
 }
 
-function authorizationOk(header: string | undefined, expectedToken: string): boolean {
-  if (!header) return false;
-  const trimmed = header.trim();
-  if (trimmed === expectedToken) return true;
-  if (trimmed === `Bearer ${expectedToken}`) return true;
-  return false;
+function secretOk(given: unknown, expected: string): boolean {
+  return typeof given === "string" && given.length > 0 && given === expected.trim();
 }
 
 async function findUidByPhone(senderChatId: string): Promise<{ uid: string; phone: string } | null> {
@@ -129,10 +126,10 @@ async function completeBare(uid: string): Promise<CompleteResult> {
   return { ok: false, reason: "יש כמה תזכורות פתוחות — השב עם הקוד שמופיע בהודעה, למשל: בוצע AB12" };
 }
 
-export const greenApiWebhook = functions.https.onRequest(
+export const ultramsgWebhook = functions.https.onRequest(
   {
-    secrets: [greenApiUrl, greenApiInstance, greenApiToken],
-    // Green API calls us without a Google identity token. Persist public
+    secrets: [...whatsappSecrets, webhookSecret],
+    // UltraMsg calls us without a Google identity token. Persist public
     // invoker across deploys so we don't regress to Cloud Run 401s.
     invoker: "public",
   },
@@ -142,32 +139,31 @@ export const greenApiWebhook = functions.https.onRequest(
       return;
     }
 
-    const expectedToken = greenApiToken.value();
-    const auth = req.header("Authorization") ?? req.header("authorization");
-    if (!authorizationOk(auth, expectedToken)) {
-      console.warn("greenApiWebhook unauthorized", { hasAuth: Boolean(auth) });
+    if (!secretOk(req.query.secret, webhookSecret.value())) {
+      console.warn("ultramsgWebhook unauthorized", { hasSecret: Boolean(req.query.secret) });
       res.status(401).send("unauthorized");
       return;
     }
 
     // Gen2 sometimes delivers JSON as a string / Buffer — normalize first.
-    let payload: GreenIncomingWebhook = {};
+    let payload: UltraMsgWebhook = {};
     try {
       if (typeof req.body === "string") payload = JSON.parse(req.body);
       else if (Buffer.isBuffer(req.body)) payload = JSON.parse(req.body.toString("utf8"));
-      else if (req.body && typeof req.body === "object") payload = req.body as GreenIncomingWebhook;
+      else if (req.body && typeof req.body === "object") payload = req.body as UltraMsgWebhook;
       else if ((req as unknown as { rawBody?: Buffer }).rawBody) {
         payload = JSON.parse((req as unknown as { rawBody: Buffer }).rawBody.toString("utf8"));
       }
     } catch (err) {
-      console.error("greenApiWebhook body parse error", err);
+      console.error("ultramsgWebhook body parse error", err);
       res.status(400).send("bad json");
       return;
     }
 
-    const instanceId = String(payload.instanceData?.idInstance ?? "");
-    if (instanceId && instanceId !== String(greenApiInstance.value())) {
-      console.warn("greenApiWebhook wrong instance", instanceId);
+    // The secret holds "instance193947"; the payload carries just "193947".
+    const instanceId = String(payload.instanceId ?? "").replace(/\D/g, "");
+    if (instanceId && instanceId !== ultramsgInstance.value().replace(/\D/g, "")) {
+      console.warn("ultramsgWebhook wrong instance", instanceId);
       res.status(403).send("wrong instance");
       return;
     }
@@ -175,51 +171,39 @@ export const greenApiWebhook = functions.https.onRequest(
     // Process BEFORE acking. Cloud Functions may freeze the request after
     // res.send(), which previously dropped completion side-effects silently.
     try {
-      // When the Green API WhatsApp is the user's own phone, replies typed on
-      // the device arrive as outgoingMessageReceived (not incoming).
-      const type = payload.typeWebhook;
-      console.log("greenApiWebhook event", {
+      const type = payload.event_type;
+      console.log("ultramsgWebhook event", {
         type,
         textPreview: extractText(payload)?.slice(0, 40) ?? null,
-        sender: payload.senderData?.sender ?? null,
-        chatId: payload.senderData?.chatId ?? null,
+        from: payload.data?.from ?? null,
+        fromMe: payload.data?.fromMe ?? null,
       });
 
-      if (type === "quotaExceeded") {
-        // Surface the actual usage so it's visible in logs without having to
-        // cross-reference the Green API console — see WhatsAppQuotaExceededError
-        // for where sends themselves are detected and skipped.
-        console.warn("greenApiWebhook quota exceeded", payload.quotaData ?? null);
-        res.status(200).send("ok");
-        return;
-      }
-
-      if (type !== "incomingMessageReceived" && type !== "outgoingMessageReceived") {
+      if (type !== "message_received" && type !== "message_create") {
         res.status(200).send("ok");
         return;
       }
 
       const text = extractText(payload);
       if (!text) {
-        console.log("greenApiWebhook skip: no text");
+        console.log("ultramsgWebhook skip: no text");
         res.status(200).send("ok");
         return;
       }
 
       const reply = parseCompletionReply(text);
       if (!reply) {
-        console.log("greenApiWebhook skip: not a completion reply", text.slice(0, 40));
+        console.log("ultramsgWebhook skip: not a completion reply", text.slice(0, 40));
         res.status(200).send("ok");
         return;
       }
 
-      // Incoming: sender is the user's phone. Outgoing-from-phone: sender is
-      // the instance WID (also the user's phone in the self-notify setup).
-      const sender = payload.senderData?.sender
-        ?? payload.senderData?.chatId
-        ?? payload.instanceData?.wid;
+      // Received: `from` is the user's phone. Created on the instance's own
+      // phone: `from` is the instance number (also the user's phone in the
+      // self-notify setup).
+      const sender = payload.data?.from;
       if (!sender) {
-        console.warn("greenApiWebhook skip: no sender");
+        console.warn("ultramsgWebhook skip: no sender");
         res.status(200).send("ok");
         return;
       }
@@ -231,7 +215,7 @@ export const greenApiWebhook = functions.https.onRequest(
         return;
       }
 
-      console.log("greenApiWebhook completing", { uid: owner.uid, reply });
+      console.log("ultramsgWebhook completing", { uid: owner.uid, reply });
 
       const result = reply.kind === "code"
         ? await completeReminderByCode(owner.uid, reply.code)
@@ -240,24 +224,18 @@ export const greenApiWebhook = functions.https.onRequest(
         ? `✅ סומן כבוצע: ${result.title}`
         : `⚠️ לא הצלחתי לסמן כבוצע — ${result.reason}`;
 
-      console.log("greenApiWebhook result", result);
+      console.log("ultramsgWebhook result", result);
       try {
-        await sendWhatsApp(
-          greenApiUrl.value(),
-          greenApiInstance.value(),
-          greenApiToken.value(),
-          owner.phone,
-          responseText,
-        );
+        await sendWhatsApp(owner.phone, responseText);
       } catch (err) {
-        if (!(err instanceof WhatsAppQuotaExceededError)) throw err;
+        if (!(err instanceof WhatsAppUnavailableError)) throw err;
         // The reminder was still marked done above — only the confirmation
         // reply failed to deliver, so don't fail the whole webhook over it.
-        console.warn("greenApiWebhook: quota exceeded sending completion reply", err.detail);
+        console.warn("ultramsgWebhook: WhatsApp unavailable sending completion reply", err.detail);
       }
       res.status(200).send("ok");
     } catch (err) {
-      console.error("Green API webhook processing error:", err);
+      console.error("UltraMsg webhook processing error:", err);
       if (!res.headersSent) res.status(500).send("error");
     }
   }

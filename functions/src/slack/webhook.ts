@@ -8,7 +8,7 @@ import { getValidAccessToken } from "../accounts/tokenHelper";
 import { verifySlackSignature } from "./signature";
 import { isMention, isDirectMessage } from "./mentionDetection";
 import { getSlackChannelName, getSlackUserName } from "./client";
-import { sendWhatsApp, greenApiUrl, greenApiInstance, greenApiToken } from "../notifications/whatsapp";
+import { sendWhatsApp, whatsappSecrets } from "../notifications/whatsapp";
 
 export const slackSigningSecret = defineSecret("SLACK_SIGNING_SECRET");
 
@@ -95,12 +95,12 @@ async function handleMessageEvent(teamId: string, event: SlackMessageEvent): Pro
 
   const kind = isDM ? "הודעה ישירה" : `אזכור בערוץ ${channelName}`;
   const message = `💬 [Slack] ${kind} מ-${fromUserName}:\n${event.text ?? ""}`;
-  await sendWhatsApp(greenApiUrl.value(), greenApiInstance.value(), greenApiToken.value(), settings.whatsapp.phone, message);
+  await sendWhatsApp(settings.whatsapp.phone, message);
   await msgRef.update({ notifiedViaWhatsApp: true });
 }
 
 export const slackEventsWebhook = functions.https.onRequest(
-  { secrets: [slackSigningSecret, greenApiUrl, greenApiInstance, greenApiToken] },
+  { secrets: [slackSigningSecret, ...whatsappSecrets] },
   async (req, res) => {
     const timestamp = req.header("X-Slack-Request-Timestamp") ?? "";
     const signature = req.header("X-Slack-Signature") ?? "";

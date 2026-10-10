@@ -242,7 +242,7 @@ export default function CultureSection() {
               style={{ color: "#0D1321" }}
             />
             <p className="text-xs mt-1" style={{ color: "#5B6477" }}>
-              יקבל רק את הודעות התרבות, בנוסף למספר הראשי. כל מספר נוסף נספר במכסת אנשי הקשר החודשית של Green API.
+              יקבל רק את הודעות התרבות, בנוסף למספר הראשי.
             </p>
           </div>
 
